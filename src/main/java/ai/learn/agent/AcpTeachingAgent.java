@@ -76,7 +76,7 @@ public class AcpTeachingAgent {
 
     /** Built per session, so the model knows where it runs and which project it works on. */
     private static String systemPrompt(String cwd, McpConnections mcp) {
-        return basePrompt(cwd) + mcpPrompt(mcp);
+        return basePrompt(cwd) + mcpPrompt(mcp) + reactInstructions();
     }
 
     private static String mcpPrompt(McpConnections mcp) {
@@ -85,7 +85,9 @@ public class AcpTeachingAgent {
         }
         StringBuilder sb = new StringBuilder("""
 
-                You are also connected to these MCP servers, provided by the IDE. Their tools give you                 IDE features (such as code search, inspections, symbols, run configurations); prefer them                 over the basic tools when they fit the task:
+                You are also connected to these MCP servers, provided by the IDE. Their tools give you
+                IDE features (such as code search, inspections, symbols, run configurations); prefer them
+                over the basic tools when they fit the task:
                 """);
         for (McpConnections.Connected server : mcp.connected()) {
             sb.append("- ").append(server.name()).append(": ")
@@ -96,7 +98,8 @@ public class AcpTeachingAgent {
 
     private static String basePrompt(String cwd) {
         return """
-                You are a patient teaching assistant, running as an ACP (Agent Client Protocol) agent                 inside the user's JetBrains IDE (connected through JetBrains AIR).
+                You are a patient teaching assistant, running as an ACP (Agent Client Protocol) agent
+                inside the user's JetBrains IDE (connected through JetBrains AIR).
 
                 The user has a project open in the IDE. Project root: %s
                 Operating system: %s
@@ -107,10 +110,46 @@ public class AcpTeachingAgent {
                 - write_file: create or overwrite a file (the IDE shows the change to the user)
                 - run_command: run a shell command in the project root in the IDE's terminal
 
-                When the user asks about "this project", "my code" or a file, look at it with your                 tools instead of guessing or asking them to paste it. Read a file before changing it.                 Only write files or run commands that change things when the user asks you to.
+                When the user asks about "this project", "my code" or a file, look at it with your
+                tools instead of guessing or asking them to paste it. Read a file before changing it.
+                Only write files if the file path is in the .teaching folder in the root of the project.
 
-                Explain concepts step by step, use examples from the user's own code where it helps,                 and ask clarifying questions when needed.
+                Explain concepts step by step, use examples from the user's own code where it helps,
+                and ask clarifying questions when needed.
                 """.formatted(cwd, System.getProperty("os.name"));
+    }
+
+    // ---------------------------------------------------------------- ReAct reasoning
+
+    /**
+     * Appends the ReAct reasoning instructions to the system prompt.
+     *
+     * <p>The ReAct pattern guides the agent to reason before acting:
+     * <ol>
+     *   <li><b>Thought</b> — reason about what to do next</li>
+     *   <li><b>Action</b> — call a tool</li>
+     *   <li><b>Observation</b> — receive the tool result</li>
+     * </ol>
+     * This cycle repeats until the agent has enough information to answer.
+     */
+    private static String reactInstructions() {
+        return """
+
+                Before taking any action, think through the problem step by step. Use this pattern:
+
+                Thought: <reason about what you know, what you need, and what to do next>
+                Action: <call a tool with specific arguments>
+                Observation: <the tool's result — provided automatically>
+
+                Repeat this cycle until you have enough information to answer the user's question.
+                When you are ready to answer, provide a clear, complete response without calling more tools.
+
+                Key principles:
+                - Break complex problems into smaller steps
+                - Verify assumptions by reading files or running commands
+                - If a tool fails, analyze the error and try a different approach
+                - Keep your thoughts concise and focused on the next step
+                """;
     }
 
     private static final LLModel MODEL = new LLModel(
@@ -349,8 +388,12 @@ public class AcpTeachingAgent {
     private static final int MAX_TOOL_STEPS = 25;
 
     /**
-     * The agent loop: ask the LLM, run every tool it calls, send the results back, repeat until it
-     * answers without calling tools.
+     * ReAct agent loop: Thought → Action → Observation cycle.
+     *
+     * <p>The LLM is prompted to reason (Thought), call tools (Action), and receive results
+     * (Observation). After each tool execution, the results are fed back with an Observation
+     * prompt so the LLM can reason about what to do next. This continues until the LLM provides
+     * a final answer without calling more tools.
      *
      * <p>This replaces Koog's {@code singleRunStrategy}, which ends the run as soon as a reply contains
      * text — even when that reply also calls a tool (GPT-4o often says "Let me search…" and calls a
@@ -363,10 +406,21 @@ public class AcpTeachingAgent {
         for (int step = 0; step < MAX_TOOL_STEPS; step++) {
             List<MessagePart.Tool.Call> calls = toolCalls(reply);
             if (calls.isEmpty()) {
+                // No tool calls — the LLM has produced a final answer (possibly with reasoning text).
                 return text(reply);
             }
-            // Every call gets a result before the next request, so the history always stays valid.
-            reply = ctx.sendToolResults(ctx.executeTools(calls, false));
+            // Execute all tool calls from this Action step — returns ReceivedToolResult list
+            List<ai.koog.agents.core.environment.ReceivedToolResult> results =
+                    ctx.executeTools(calls, false);
+            // Send tool results to the LLM (writes to history and requests a response)
+            reply = ctx.sendToolResults(results);
+            // If the LLM still wants to call tools, prompt it to reason about the observations
+            List<MessagePart.Tool.Call> nextCalls = toolCalls(reply);
+            if (!nextCalls.isEmpty()) {
+                // Format the observations and prompt for the next Thought
+                String observations = formatObservations(results);
+                reply = ctx.requestLLM("Observation: " + observations + "\n\nThought:");
+            }
         }
         // Out of steps: answer the pending calls one last time, then insist on a plain answer.
         List<MessagePart.Tool.Call> pending = toolCalls(reply);
@@ -375,6 +429,28 @@ public class AcpTeachingAgent {
         }
         return text(ctx.requestLLMWithoutTools(
                 "You have used the maximum number of tool steps. Answer now with what you have found."));
+    }
+
+    /**
+     * Formats tool results as Observation text for the ReAct loop.
+     * Each tool result is labeled with the tool name for clarity.
+     */
+    private static String formatObservations(
+            List<ai.koog.agents.core.environment.ReceivedToolResult> results) {
+        if (results.isEmpty()) {
+            return "(no results)";
+        }
+        if (results.size() == 1) {
+            ai.koog.agents.core.environment.ReceivedToolResult result = results.get(0);
+            return result.getOutput() != null ? result.getOutput() : "(empty result)";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < results.size(); i++) {
+            ai.koog.agents.core.environment.ReceivedToolResult result = results.get(i);
+            if (i > 0) sb.append("\n\n---\n\n");
+            sb.append(result.getOutput() != null ? result.getOutput() : "(empty result)");
+        }
+        return sb.toString();
     }
 
     private static List<MessagePart.Tool.Call> toolCalls(Message.Assistant reply) {
