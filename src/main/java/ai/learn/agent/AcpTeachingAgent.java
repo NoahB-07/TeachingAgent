@@ -3,86 +3,382 @@ package ai.learn.agent;
 import ai.koog.agents.chatMemory.feature.ChatMemory;
 import ai.koog.agents.core.agent.AIAgent;
 import ai.koog.agents.core.agent.AIAgentSimpleStrategies;
+import ai.koog.agents.core.tools.ToolRegistry;
+import ai.koog.agents.features.eventHandler.feature.EventHandler;
 import ai.koog.http.client.ktor.KtorKoogHttpClient;
 import ai.koog.prompt.executor.clients.openai.OpenAILLMClient;
 import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor;
 import ai.koog.prompt.llm.LLMCapability;
 import ai.koog.prompt.llm.LLMProvider;
 import ai.koog.prompt.llm.LLModel;
-import com.agentclientprotocol.sdk.annotation.AcpAgent;
-import com.agentclientprotocol.sdk.annotation.NewSession;
-import com.agentclientprotocol.sdk.annotation.Prompt;
+import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration;
+import com.agentclientprotocol.sdk.agent.AcpSyncAgent;
 import com.agentclientprotocol.sdk.agent.SyncPromptContext;
 import com.agentclientprotocol.sdk.agent.support.AcpAgentSupport;
 import com.agentclientprotocol.sdk.agent.transport.StdioAcpAgentTransport;
-import com.agentclientprotocol.sdk.spec.AcpSchema.InitializeResponse;
+import com.agentclientprotocol.sdk.annotation.AcpAgent;
+import com.agentclientprotocol.sdk.annotation.Cancel;
+import com.agentclientprotocol.sdk.annotation.CloseSession;
+import com.agentclientprotocol.sdk.annotation.ListSessions;
+import com.agentclientprotocol.sdk.annotation.LoadSession;
+import com.agentclientprotocol.sdk.annotation.NewSession;
+import com.agentclientprotocol.sdk.annotation.Prompt;
+import com.agentclientprotocol.sdk.annotation.SessionId;
+import com.agentclientprotocol.sdk.error.AcpErrorCodes;
+import com.agentclientprotocol.sdk.error.AcpProtocolException;
+import com.agentclientprotocol.sdk.spec.AcpSchema.AgentMessageChunk;
+import com.agentclientprotocol.sdk.spec.AcpSchema.CloseSessionResponse;
+import com.agentclientprotocol.sdk.spec.AcpSchema.ContentBlock;
+import com.agentclientprotocol.sdk.spec.AcpSchema.ListSessionsRequest;
+import com.agentclientprotocol.sdk.spec.AcpSchema.ListSessionsResponse;
+import com.agentclientprotocol.sdk.spec.AcpSchema.LoadSessionRequest;
+import com.agentclientprotocol.sdk.spec.AcpSchema.LoadSessionResponse;
+import com.agentclientprotocol.sdk.spec.AcpSchema.NewSessionRequest;
 import com.agentclientprotocol.sdk.spec.AcpSchema.NewSessionResponse;
 import com.agentclientprotocol.sdk.spec.AcpSchema.PromptRequest;
 import com.agentclientprotocol.sdk.spec.AcpSchema.PromptResponse;
+import com.agentclientprotocol.sdk.spec.AcpSchema.ResourceLink;
+import com.agentclientprotocol.sdk.spec.AcpSchema.SessionInfo;
+import com.agentclientprotocol.sdk.spec.AcpSchema.TextContent;
+import com.agentclientprotocol.sdk.spec.AcpSchema.UserMessageChunk;
 
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * ACP-compatible entry point for the TeachingAgent.
- * This class wraps the Koog AIAgent so it can be connected to JetBrains AIR via ACP.
+ *
+ * <p>Implements the ACP methods:
+ * <ul>
+ *   <li>{@code initialize} – derived by the SDK from the annotations on this class</li>
+ *   <li>{@code session/new} – creates a session with its own Koog agent and chat memory</li>
+ *   <li>{@code session/prompt} – runs the Koog agent and streams the answer back</li>
+ *   <li>{@code session/cancel} – stops the running turn</li>
+ *   <li>{@code session/load} – replays a session's conversation (while this process is alive)</li>
+ *   <li>{@code session/list} – lists the sessions this process knows</li>
+ *   <li>{@code session/close} – frees a session's state</li>
+ * </ul>
+ *
+ * <p>Note: stdout is the ACP channel, so nothing in this process may print to it.
  */
-@AcpAgent(name = "teaching-agent", version = "1.0")
+@AcpAgent(name = "teaching-agent", title = "Teaching Agent", version = "1.0", mcpHttp = true, mcpSse = true)
 public class AcpTeachingAgent {
 
-    @NewSession
-    NewSessionResponse newSession() {
-        return new NewSessionResponse(UUID.randomUUID().toString(), null, null);
+    /** Built per session, so the model knows where it runs and which project it works on. */
+    private static String systemPrompt(String cwd, McpConnections mcp) {
+        return basePrompt(cwd) + mcpPrompt(mcp);
     }
 
+    private static String mcpPrompt(McpConnections mcp) {
+        if (mcp.connected().isEmpty()) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder("""
+
+                You are also connected to these MCP servers, provided by the IDE. Their tools give you                 IDE features (such as code search, inspections, symbols, run configurations); prefer them                 over the basic tools when they fit the task:
+                """);
+        for (McpConnections.Connected server : mcp.connected()) {
+            sb.append("- ").append(server.name()).append(": ")
+                    .append(String.join(", ", server.toolNames())).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private static String basePrompt(String cwd) {
+        return """
+                You are a patient teaching assistant, running as an ACP (Agent Client Protocol) agent                 inside the user's JetBrains IDE (connected through JetBrains AIR).
+
+                The user has a project open in the IDE. Project root: %s
+                Operating system: %s
+
+                You have tools that act on that project through the IDE:
+                - list_directory: list files and folders (use "." for the project root)
+                - read_file: read a file as the IDE sees it, including unsaved edits
+                - write_file: create or overwrite a file (the IDE shows the change to the user)
+                - run_command: run a shell command in the project root in the IDE's terminal
+
+                When the user asks about "this project", "my code" or a file, look at it with your                 tools instead of guessing or asking them to paste it. Read a file before changing it.                 Only write files or run commands that change things when the user asks you to.
+
+                Explain concepts step by step, use examples from the user's own code where it helps,                 and ask clarifying questions when needed.
+                """.formatted(cwd, System.getProperty("os.name"));
+    }
+
+    private static final LLModel MODEL = new LLModel(
+            LLMProvider.OpenAI,
+            "gpt-4o",
+            List.of(
+                    LLMCapability.Completion.INSTANCE,
+                    LLMCapability.Tools.INSTANCE,
+                    LLMCapability.OpenAIEndpoint.Completions.INSTANCE
+            )
+    );
+
+    /** One conversational turn, kept so {@code session/load} can replay the conversation. */
+    private record Turn(boolean fromUser, String text) {
+    }
+
+    /** Per-session state. Each session gets its own Koog agent, so its chat memory is isolated. */
+    private static final class Session {
+        final String id;
+        final String cwd;
+        final AIAgent<String, String> agent;
+        final AcpIdeTools tools;
+        final McpConnections mcp;
+        final List<Turn> history = new ArrayList<>();
+        volatile String title;
+        volatile Instant updatedAt = Instant.now();
+        volatile CompletableFuture<String> running;
+
+        Session(String id, String cwd, AcpIdeTools tools, McpConnections mcp, AIAgent<String, String> agent) {
+            this.id = id;
+            this.cwd = cwd;
+            this.tools = tools;
+            this.mcp = mcp;
+            this.agent = agent;
+        }
+
+        synchronized void addTurn(Turn turn) {
+            history.add(turn);
+            updatedAt = Instant.now();
+            if (title == null && turn.fromUser()) {
+                String t = turn.text().strip().replaceAll("\\s+", " ");
+                title = t.length() > 60 ? t.substring(0, 57) + "..." : t;
+            }
+        }
+
+        synchronized List<Turn> snapshot() {
+            return List.copyOf(history);
+        }
+    }
+
+    private final Map<String, Session> sessions = new ConcurrentHashMap<>();
+
+    /** Shared, lazily created LLM executor (needs the API key). */
+    private volatile MultiLLMPromptExecutor promptExecutor;
+
+    // ---------------------------------------------------------------- session/new
+
+    @NewSession
+    NewSessionResponse newSession(NewSessionRequest request) {
+        String sessionId = UUID.randomUUID().toString();
+        AcpIdeTools tools = new AcpIdeTools(request.cwd());
+        // Connect to the MCP servers the client passed (with AIR + use_idea_mcp: the IDE's own server).
+        McpConnections mcp = McpConnections.connect(request.mcpServers(), AcpIdeTools.OWN_TOOL_NAMES);
+        AIAgent<String, String> agent;
+        try {
+            agent = createKoogAgent(request.cwd(), tools, mcp);
+        } catch (RuntimeException e) {
+            mcp.close();
+            throw e;
+        }
+        sessions.put(sessionId, new Session(sessionId, request.cwd(), tools, mcp, agent));
+        return new NewSessionResponse(sessionId, null, null); // no modes, no config options
+    }
+
+    // ---------------------------------------------------------------- session/prompt
+
     @Prompt
-    PromptResponse prompt(PromptRequest req, SyncPromptContext ctx) {
-        // Get API key from environment variable
-        String apiKey = System.getenv("OPENAI_API_KEY");
-        if (apiKey == null || apiKey.isEmpty()) {
-            ctx.sendMessage("Error: OPENAI_API_KEY environment variable is not set.");
+    PromptResponse prompt(PromptRequest request, SyncPromptContext ctx) {
+        Session session = requireSession(request.sessionId());
+
+        String userText = promptText(request.prompt());
+        if (userText.isBlank()) {
+            ctx.sendMessage("I didn't receive any text. What would you like to learn about?");
             return PromptResponse.endTurn();
         }
+        session.addTurn(new Turn(true, userText));
+        session.tools.bind(ctx); // tool calls in this turn go through this prompt's client context
 
-        // Set up the Koog agent
-        var httpClientFactory = new KtorKoogHttpClient.Factory();
-        var openAIClient = new OpenAILLMClient(apiKey, httpClientFactory);
-        var promptExecutor = new MultiLLMPromptExecutor(openAIClient);
-        LLModel model = new LLModel(
-                LLMProvider.OpenAI,
-                "gpt-4o",
-                List.of(
-                        LLMCapability.Completion.INSTANCE,
-                        LLMCapability.OpenAIEndpoint.Completions.INSTANCE
-                )
-        );
+        // Run the (blocking) Koog agent on another thread so a cancel can end the turn promptly.
+        // The ACP session id doubles as the Koog session id, which keys ChatMemory.
+        CompletableFuture<String> run = CompletableFuture.supplyAsync(
+                () -> session.agent.run(userText, session.id));
+        session.running = run;
+        ctx.onCancel(() -> run.cancel(true));
 
-        AIAgent<String, String> agent = AIAgent.builder()
-                .promptExecutor(promptExecutor)
-                .llmModel(model)
-                .systemPrompt("You are a patient teaching assistant. Explain concepts step by step, use examples, and ask clarifying questions when needed.")
-                .graphStrategy(AIAgentSimpleStrategies.singleRunStrategy())
-                .install(ChatMemory.Feature, config -> {})
-                .build();
-
-        // Run the agent and stream the response back via ACP
         try {
-            String response = agent.run(req.text(), "acp-session-" + UUID.randomUUID());
-            ctx.sendMessage(response);
-        } catch (Exception e) {
-            ctx.sendMessage("Error: " + e.getMessage());
+            String answer = run.join();
+            if (ctx.isCancelled()) {
+                return PromptResponse.cancelled();
+            }
+            session.addTurn(new Turn(false, answer));
+            ctx.sendMessage(answer);
+            return PromptResponse.endTurn();
+        } catch (CancellationException e) {
+            return PromptResponse.cancelled();
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            String msg = "Error: " + cause.getMessage();
+            session.addTurn(new Turn(false, msg));
+            ctx.sendMessage(msg);
+            return PromptResponse.endTurn();
+        } finally {
+            session.running = null;
         }
+    }
 
-        return PromptResponse.endTurn();
+    // ---------------------------------------------------------------- session/cancel
+
+    @Cancel
+    void cancel(@SessionId String sessionId) {
+        // The prompt's onCancel hook already stops the turn; this also covers any stray work.
+        Session session = sessions.get(sessionId);
+        if (session != null) {
+            CompletableFuture<String> run = session.running;
+            if (run != null) {
+                run.cancel(true);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- session/load
+
+    @LoadSession
+    LoadSessionResponse loadSession(LoadSessionRequest request, AcpSyncAgent client) {
+        Session session = requireSession(request.sessionId());
+        for (Turn turn : session.snapshot()) {
+            TextContent text = new TextContent(turn.text());
+            client.sendSessionUpdate(session.id,
+                    turn.fromUser() ? new UserMessageChunk(text) : new AgentMessageChunk(text));
+        }
+        return new LoadSessionResponse(null, null);
+    }
+
+    // ---------------------------------------------------------------- session/list
+
+    @ListSessions
+    ListSessionsResponse listSessions(ListSessionsRequest request) {
+        List<SessionInfo> infos = sessions.values().stream()
+                .filter(s -> request.cwd() == null || request.cwd().equals(s.cwd))
+                .sorted(Comparator.comparing((Session s) -> s.updatedAt).reversed())
+                .map(s -> new SessionInfo(s.id, s.cwd, s.title, s.updatedAt.toString(), null, null))
+                .toList();
+        return new ListSessionsResponse(infos);
+    }
+
+    // ---------------------------------------------------------------- session/close
+
+    @CloseSession
+    CloseSessionResponse closeSession(@SessionId String sessionId) {
+        // The SDK has already cancelled any running prompt before calling this.
+        Session session = sessions.remove(sessionId);
+        if (session != null) {
+            session.mcp.close();
+        }
+        return new CloseSessionResponse(null);
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    private Session requireSession(String sessionId) {
+        Session session = sessions.get(sessionId);
+        if (session == null) {
+            throw new AcpProtocolException(AcpErrorCodes.RESOURCE_NOT_FOUND,
+                    "Unknown session: " + sessionId);
+        }
+        return session;
+    }
+
+    /** Joins all text blocks, and mentions any resource links the client attached. */
+    private static String promptText(List<ContentBlock> blocks) {
+        if (blocks == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (ContentBlock block : blocks) {
+            if (block instanceof TextContent text) {
+                if (!sb.isEmpty()) sb.append("\n");
+                sb.append(text.text());
+            } else if (block instanceof ResourceLink link) {
+                if (!sb.isEmpty()) sb.append("\n");
+                sb.append("[Referenced resource: ").append(link.name()).append(" (").append(link.uri()).append(")]");
+            }
+        }
+        return sb.toString();
+    }
+
+    private AIAgent<String, String> createKoogAgent(String cwd, AcpIdeTools tools, McpConnections mcp) {
+        ToolRegistry registry = ToolRegistry.builder().tools(tools).tools(mcp.tools()).build();
+        return AIAgent.builder()
+                .promptExecutor(executor())
+                .llmModel(MODEL)
+                .systemPrompt(systemPrompt(cwd, mcp))
+                .toolRegistry(registry)
+                .graphStrategy(AIAgentSimpleStrategies.singleRunStrategy())
+                // Our own tools report themselves; show the MCP servers' tool calls in the chat too.
+                .install(EventHandler.Feature, events -> {
+                    events.onToolCallStarting(e -> {
+                        if (mcp.hasTool(e.getToolName())) {
+                            tools.mcpToolStarted(callId(e.getToolCallId(), e.getToolName()),
+                                    e.getToolName(), String.valueOf(e.getToolArgs()));
+                        }
+                    });
+                    events.onToolCallCompleted(e -> {
+                        if (mcp.hasTool(e.getToolName())) {
+                            tools.mcpToolFinished(callId(e.getToolCallId(), e.getToolName()), true, null);
+                        }
+                    });
+                    events.onToolCallFailed(e -> {
+                        if (mcp.hasTool(e.getToolName())) {
+                            tools.mcpToolFinished(callId(e.getToolCallId(), e.getToolName()), false,
+                                    e.getMessage());
+                        }
+                    });
+                })
+                .install(ChatMemory.Feature, config -> {}) // in-memory history per agent
+                .build();
+    }
+
+    private static String callId(String toolCallId, String toolName) {
+        return "mcp-" + (toolCallId != null ? toolCallId : toolName);
+    }
+
+    private MultiLLMPromptExecutor executor() {
+        MultiLLMPromptExecutor executor = promptExecutor;
+        if (executor == null) {
+            synchronized (this) {
+                executor = promptExecutor;
+                if (executor == null) {
+                    String apiKey = System.getenv("OPENAI_API_KEY");
+                    if (apiKey == null || apiKey.isBlank()) {
+                        // Reported to the client as the error of session/new.
+                        throw new AcpProtocolException(AcpErrorCodes.INTERNAL_ERROR,
+                                "OPENAI_API_KEY environment variable is not set for the agent process.");
+                    }
+                    var openAIClient = new OpenAILLMClient(apiKey, new KtorKoogHttpClient.Factory());
+                    executor = new MultiLLMPromptExecutor(openAIClient);
+                    promptExecutor = executor;
+                }
+            }
+        }
+        return executor;
     }
 
     /**
      * Main entry point — starts the ACP agent over STDIO transport.
-     * This is what AIR launches to connect to your agent.
+     * This is what the client (e.g. JetBrains AIR) launches to connect to the agent.
      */
     public static void main(String[] args) {
+        // stdout carries the ACP JSON-RPC stream: any stray print would corrupt it.
+        // kotlin-logging (used by Koog) prints a startup banner to stdout by default.
+        KotlinLoggingConfiguration.INSTANCE.setLogStartupMessage(false);
+
+        // The transport captures the real stdout here; afterwards, route System.out to stderr
+        // so that library printlns can never interleave with protocol messages.
+        StdioAcpAgentTransport transport = new StdioAcpAgentTransport();
+        System.setOut(System.err);
+
         AcpAgentSupport.create(new AcpTeachingAgent())
-                .transport(new StdioAcpAgentTransport())
+                .transport(transport)
+                .build()
                 .run();
     }
 }
