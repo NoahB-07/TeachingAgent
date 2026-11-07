@@ -73,6 +73,7 @@ final class McpConnections implements AutoCloseable {
                     if (taken.add(tool.getName())) {
                         mcp.tools.add(tool);
                         added.add(tool.getName());
+                        System.err.println("[mcp] " + name + " tool: " + tool.getDescriptor());
                     } else {
                         System.err.println("[mcp] " + name + ": skipping tool '" + tool.getName()
                                 + "' (name already in use)");

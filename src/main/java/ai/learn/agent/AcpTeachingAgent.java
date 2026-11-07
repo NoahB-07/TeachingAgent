@@ -2,7 +2,7 @@ package ai.learn.agent;
 
 import ai.koog.agents.chatMemory.feature.ChatMemory;
 import ai.koog.agents.core.agent.AIAgent;
-import ai.koog.agents.core.agent.AIAgentSimpleStrategies;
+import ai.koog.agents.core.agent.context.AIAgentFunctionalContext;
 import ai.koog.agents.core.tools.ToolRegistry;
 import ai.koog.agents.features.eventHandler.feature.EventHandler;
 import ai.koog.http.client.ktor.KtorKoogHttpClient;
@@ -11,6 +11,8 @@ import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor;
 import ai.koog.prompt.llm.LLMCapability;
 import ai.koog.prompt.llm.LLMProvider;
 import ai.koog.prompt.llm.LLModel;
+import ai.koog.prompt.message.Message;
+import ai.koog.prompt.message.MessagePart;
 import io.github.oshai.kotlinlogging.KotlinLoggingConfiguration;
 import com.agentclientprotocol.sdk.agent.AcpSyncAgent;
 import com.agentclientprotocol.sdk.agent.SyncPromptContext;
@@ -129,7 +131,7 @@ public class AcpTeachingAgent {
     private static final class Session {
         final String id;
         final String cwd;
-        final AIAgent<String, String> agent;
+        volatile AIAgent<String, String> agent;
         final AcpIdeTools tools;
         final McpConnections mcp;
         final List<Turn> history = new ArrayList<>();
@@ -217,6 +219,12 @@ public class AcpTeachingAgent {
         } catch (CompletionException e) {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
             String msg = "Error: " + cause.getMessage();
+            // A failed turn can leave the LLM history in a state every later request is rejected for
+            // (e.g. a tool call without its result). Start the model's memory afresh so the session
+            // stays usable; the chat itself stays visible in the IDE.
+            session.agent = createKoogAgent(session.cwd, session.tools, session.mcp);
+            msg += "\n\n(I reset my conversation memory after this error, so I may not remember "
+                    + "earlier messages in this chat.)";
             session.addTurn(new Turn(false, msg));
             ctx.sendMessage(msg);
             return PromptResponse.endTurn();
@@ -312,7 +320,7 @@ public class AcpTeachingAgent {
                 .llmModel(MODEL)
                 .systemPrompt(systemPrompt(cwd, mcp))
                 .toolRegistry(registry)
-                .graphStrategy(AIAgentSimpleStrategies.singleRunStrategy())
+                .functionalStrategy("teaching", AcpTeachingAgent::runWithTools)
                 // Our own tools report themselves; show the MCP servers' tool calls in the chat too.
                 .install(EventHandler.Feature, events -> {
                     events.onToolCallStarting(e -> {
@@ -335,6 +343,52 @@ public class AcpTeachingAgent {
                 })
                 .install(ChatMemory.Feature, config -> {}) // in-memory history per agent
                 .build();
+    }
+
+    /** Upper bound on LLM ↔ tool round trips in one turn. */
+    private static final int MAX_TOOL_STEPS = 25;
+
+    /**
+     * The agent loop: ask the LLM, run every tool it calls, send the results back, repeat until it
+     * answers without calling tools.
+     *
+     * <p>This replaces Koog's {@code singleRunStrategy}, which ends the run as soon as a reply contains
+     * text — even when that reply also calls a tool (GPT-4o often says "Let me search…" and calls a
+     * tool in one message). That left an unanswered tool call in the chat memory, and OpenAI then
+     * rejects every later request in the session with "An assistant message with 'tool_calls' must be
+     * followed by tool messages".
+     */
+    private static String runWithTools(AIAgentFunctionalContext ctx, String input) {
+        Message.Assistant reply = ctx.requestLLM(input);
+        for (int step = 0; step < MAX_TOOL_STEPS; step++) {
+            List<MessagePart.Tool.Call> calls = toolCalls(reply);
+            if (calls.isEmpty()) {
+                return text(reply);
+            }
+            // Every call gets a result before the next request, so the history always stays valid.
+            reply = ctx.sendToolResults(ctx.executeTools(calls, false));
+        }
+        // Out of steps: answer the pending calls one last time, then insist on a plain answer.
+        List<MessagePart.Tool.Call> pending = toolCalls(reply);
+        if (!pending.isEmpty()) {
+            ctx.sendToolResults(ctx.executeTools(pending, false));
+        }
+        return text(ctx.requestLLMWithoutTools(
+                "You have used the maximum number of tool steps. Answer now with what you have found."));
+    }
+
+    private static List<MessagePart.Tool.Call> toolCalls(Message.Assistant reply) {
+        return reply.getParts().stream()
+                .filter(MessagePart.Tool.Call.class::isInstance)
+                .map(MessagePart.Tool.Call.class::cast)
+                .toList();
+    }
+
+    private static String text(Message.Assistant reply) {
+        return reply.getParts().stream()
+                .filter(MessagePart.Text.class::isInstance)
+                .map(p -> ((MessagePart.Text) p).getText())
+                .collect(java.util.stream.Collectors.joining("\n"));
     }
 
     private static String callId(String toolCallId, String toolName) {
