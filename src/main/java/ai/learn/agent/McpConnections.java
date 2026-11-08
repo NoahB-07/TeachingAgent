@@ -56,7 +56,10 @@ final class McpConnections implements AutoCloseable {
     record Connected(String name, List<String> toolNames) {
     }
 
+    /** Tools handed to the LLM. */
     private final List<ToolBase<?, ?>> tools = new ArrayList<>();
+    /** Every connected tool by name (first server wins), including those the agent wraps. */
+    private final Map<String, ToolBase<?, ?>> callable = new LinkedHashMap<>();
     private final List<Connected> connected = new ArrayList<>();
     private final List<AutoCloseable> resources = new ArrayList<>();
 
@@ -80,7 +83,11 @@ final class McpConnections implements AutoCloseable {
                         .get(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
                 List<String> added = new ArrayList<>();
                 for (ToolBase<?, ?> tool : registry.getTools()) {
-                    if (taken.add(tool.getName())) {
+                    mcp.callable.putIfAbsent(tool.getName(), tool);
+                    if (reservedNames.contains(tool.getName())) {
+                        // The agent has its own tool of this name, which calls this one itself.
+                        System.err.println("[mcp] " + name + ": '" + tool.getName() + "' is used through the agent's own tool");
+                    } else if (taken.add(tool.getName())) {
                         mcp.tools.add(tool);
                         added.add(tool.getName());
                         System.err.println("[mcp] " + name + " tool: " + tool.getDescriptor());
@@ -107,8 +114,14 @@ final class McpConnections implements AutoCloseable {
         return connected;
     }
 
+    /** True if the LLM was given this MCP tool. */
     boolean hasTool(String toolName) {
         return tools.stream().anyMatch(t -> t.getName().equals(toolName));
+    }
+
+    /** True if some server offers this tool, whether or not the LLM sees it. */
+    boolean canCall(String toolName) {
+        return callable.containsKey(toolName);
     }
 
     /** The outcome of calling an MCP tool directly (not through the LLM). */
@@ -119,14 +132,17 @@ final class McpConnections implements AutoCloseable {
      * Calls one of the connected MCP tools with the given arguments and waits for its result.
      * Used for AIR's {@code execute_tool} proxy, which Air's own wrapper tools call.
      */
-    CallResult call(String toolName, Map<String, String> args) throws Exception {
-        ToolBase<?, ?> tool = tools.stream().filter(t -> t.getName().equals(toolName)).findFirst()
-                .orElseThrow(() -> new IllegalStateException("MCP tool '" + toolName + "' is not connected"));
+    CallResult call(String toolName, Map<String, ?> args) throws Exception {
+        ToolBase<?, ?> tool = callable.get(toolName);
+        if (tool == null) {
+            throw new IllegalStateException("MCP tool '" + toolName + "' is not connected");
+        }
         if (!(tool instanceof McpTool mcpTool)) {
             throw new IllegalStateException("'" + toolName + "' is not an MCP tool");
         }
         Map<String, JsonElement> fields = new LinkedHashMap<>();
-        args.forEach((k, v) -> fields.put(k, JsonElementKt.JsonPrimitive(v)));
+        args.forEach((k, v) -> fields.put(k, v instanceof Number n
+                ? JsonElementKt.JsonPrimitive(n) : JsonElementKt.JsonPrimitive(String.valueOf(v))));
         JSONObject koogArgs = (JSONObject) KotlinxJSONElementMappersKt.toKoogJSONElement(new JsonObject(fields));
         CallToolResult result = (CallToolResult) BuildersKt.runBlocking(EmptyCoroutineContext.INSTANCE,
                 (scope, cont) -> mcpTool.execute(koogArgs, cont));
