@@ -44,6 +44,7 @@ import com.agentclientprotocol.sdk.spec.AcpSchema.SessionInfo;
 import com.agentclientprotocol.sdk.spec.AcpSchema.TextContent;
 import com.agentclientprotocol.sdk.spec.AcpSchema.UserMessageChunk;
 
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -75,8 +76,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public class AcpTeachingAgent {
 
     /** Built per session, so the model knows where it runs and which project it works on. */
-    private static String systemPrompt(String cwd, McpConnections mcp) {
-        return basePrompt(cwd) + mcpPrompt(mcp) + LearningTools.prompt(mcp) + reactInstructions();
+    private static String systemPrompt(String cwd, McpConnections mcp, TeachingProfile profile) {
+        String snippet = profile != null ? profile.systemPromptSnippet() : "";
+        return basePrompt(cwd) + snippet + mcpPrompt(mcp) + LearningTools.prompt(mcp) + reactInstructions();
     }
 
     private static String mcpPrompt(McpConnections mcp) {
@@ -121,8 +123,35 @@ public class AcpTeachingAgent {
                 code you haven't read. Read a file before changing it.
                 Only write files if the file path is in the .teaching folder in the root of the project.
 
-                Explain concepts step by step always using learning tools, use examples from the user's own code where it helps,
-                and ask clarifying questions when needed.
+                **Always use your learning tools when teaching.** Your primary job is to show the learner
+                their code in their editor, not to explain in chat text. For every question about code,
+                programming concepts, or how something works, you MUST use one of these learning tools:
+                - `learning_show_explanation_tree`: The default for explaining anything (functions, loops, variables, etc.)
+                - `learning_play_walkthrough`: For tracing code execution step by step
+                - `learning_highlight_code`: For pointing at a specific piece of code
+                
+                Do NOT just explain in chat text. The learner needs to see their code highlighted in the editor.
+                Use examples from the user's own code where it helps, and ask clarifying questions when needed.
+
+                When explaining a function or method, always explain the **whole function** first:
+                what it does overall, what parameters it takes, what it returns, and how it works at a high level.
+                Then let the learner explore the individual parts (loops, conditionals, calculations) by clicking links.
+                Never just explain line-by-line; start with the big picture, then go into the details.
+
+                **Always highlight the entire block of code, not just one line.** When you create an
+                explanation tree, use **multi-line ranges** for every node that covers a logical unit:
+                - A function: use the range from the signature to the closing brace, e.g. "10-25".
+                - A loop: use the range covering the header and body, e.g. "8-12".
+                - An if/else: use the range covering all branches, e.g. "15-22".
+                The learner should see the whole block of code you're explaining.
+                Only use a single-line range when pointing at one specific expression or variable.
+
+                **The same rule applies to walkthroughs.** When creating a walkthrough, each step's
+                `line` field should cover the entire logical unit being executed:
+                - Entering a function: use the full function range, e.g. "3-13" for the whole main() method.
+                - A loop step: use the full loop range (header + body), e.g. "8-12".
+                - Collapsed loop iterations: use the loop's range.
+                Only use a single-line `line` when pointing at one specific expression, variable, or print statement.
                 """.formatted(cwd, System.getProperty("os.name"));
     }
 
@@ -226,18 +255,20 @@ public class AcpTeachingAgent {
         final AcpIdeTools tools;
         final McpConnections mcp;
         final LearningTools learning;
+        final TeachingProfile profile;
         final List<Turn> history = new ArrayList<>();
         volatile String title;
         volatile Instant updatedAt = Instant.now();
         volatile CompletableFuture<String> running;
 
         Session(String id, String cwd, AcpIdeTools tools, McpConnections mcp, LearningTools learning,
-                AIAgent<String, String> agent) {
+                TeachingProfile profile, AIAgent<String, String> agent) {
             this.id = id;
             this.learning = learning;
             this.cwd = cwd;
             this.tools = tools;
             this.mcp = mcp;
+            this.profile = profile;
             this.agent = agent;
         }
 
@@ -270,15 +301,17 @@ public class AcpTeachingAgent {
         // AIR_IDE_MCP_URL adds the IDE's server when the client doesn't pass it (for the learning_* tools).
         McpConnections mcp = McpConnections.connect(
                 LearningTools.withConfiguredServer(request.mcpServers()), reservedToolNames());
-        LearningTools learning = new LearningTools(tools, mcp);
+        // Load persistent teaching profile so the model knows what the user already learned.
+        TeachingProfile profile = TeachingProfile.load(Path.of(request.cwd()));
+        LearningTools learning = new LearningTools(tools, mcp, profile);
         AIAgent<String, String> agent;
         try {
-            agent = createKoogAgent(request.cwd(), tools, mcp, learning);
+            agent = createKoogAgent(request.cwd(), tools, mcp, learning, profile);
         } catch (RuntimeException e) {
             mcp.close();
             throw e;
         }
-        sessions.put(sessionId, new Session(sessionId, request.cwd(), tools, mcp, learning, agent));
+        sessions.put(sessionId, new Session(sessionId, request.cwd(), tools, mcp, learning, profile, agent));
         return new NewSessionResponse(sessionId, null, null); // no modes, no config options
     }
 
@@ -319,7 +352,7 @@ public class AcpTeachingAgent {
             // A failed turn can leave the LLM history in a state every later request is rejected for
             // (e.g. a tool call without its result). Start the model's memory afresh so the session
             // stays usable; the chat itself stays visible in the IDE.
-            session.agent = createKoogAgent(session.cwd, session.tools, session.mcp, session.learning);
+            session.agent = createKoogAgent(session.cwd, session.tools, session.mcp, session.learning, session.profile);
             msg += "\n\n(I reset my conversation memory after this error, so I may not remember "
                     + "earlier messages in this chat.)";
             session.addTurn(new Turn(false, msg));
@@ -376,6 +409,7 @@ public class AcpTeachingAgent {
         // The SDK has already cancelled any running prompt before calling this.
         Session session = sessions.remove(sessionId);
         if (session != null) {
+            session.profile.save();
             session.mcp.close();
         }
         return new CloseSessionResponse(null);
@@ -418,17 +452,19 @@ public class AcpTeachingAgent {
     }
 
     private AIAgent<String, String> createKoogAgent(String cwd, AcpIdeTools tools, McpConnections mcp,
-                                                    LearningTools learning) {
+                                                    LearningTools learning, TeachingProfile profile) {
         var registryBuilder = ToolRegistry.builder().tools(tools).tools(mcp.tools());
         if (LearningTools.available(mcp)) {
             // Our learning_* tools check their input and call the plugin (directly or via AIR's execute_tool).
             registryBuilder.tools(learning);
         }
+        // Add the learning_record_topic tool so the LLM can explicitly record taught topics.
+        registryBuilder.tools(new LearningRecordTopic(profile));
         ToolRegistry registry = registryBuilder.build();
         return AIAgent.builder()
                 .promptExecutor(executor())
                 .llmModel(MODEL)
-                .systemPrompt(systemPrompt(cwd, mcp))
+                .systemPrompt(systemPrompt(cwd, mcp, profile))
                 .toolRegistry(registry)
                 .functionalStrategy("teaching", (AIAgentFunctionalContext ctx, String input) ->
                         runWithTools(ctx, input, LearningTools.available(mcp)))
@@ -478,18 +514,35 @@ public class AcpTeachingAgent {
 
     /** Nudge to force the LLM to use a learning tool after researching code. */
     private static final String LEARNING_TOOL_NUDGE = """
-            The learner asked about code. Before answering, show the code you found using a learning \
-            tool (highlight, explanation tree, or walkthrough) so the learner can see it in their \
-            editor. Use learning_highlight_code, learning_show_explanation_tree, or \
-            learning_play_walkthrough — whichever best fits what you found.""";
+            You have researched the code, but you have not shown it to the learner yet. \
+            You MUST use a learning tool to show the code in the learner's editor before answering. \
+            The learner cannot learn from text alone — they need to see their code highlighted. \
+            Use learning_show_explanation_tree to explain what the code does, \
+            learning_play_walkthrough to trace execution, or learning_highlight_code to point at a specific part. \
+            Call one of these tools now, then reply with a brief summary of what you showed.""";
 
-    /** Keywords that suggest the user is asking about code. */
+    /** Keywords that suggest the user is asking about code or programming concepts. */
     private static final java.util.regex.Pattern CODE_QUESTION_PATTERN =
             java.util.regex.Pattern.compile(
                     "\\b(file|files|class|method|function|code|line|lines|project|folder|directory|import|package|" +
                     "variable|loop|if|for|while|return|exception|error|bug|fix|debug|test|run|build|compile|" +
                     "explain|how.*work|what.*do|where.*is|show.*me|read|search|find|look|code.*review|" +
-                    "\\.java|\\.kt|\\.py|\\.js|\\.ts|\\.c|\\.cpp|\\.h|\\.go|\\.rs|\\.rb)\\b",
+                    "\\.java|\\.kt|\\.py|\\.js|\\.ts|\\.c|\\.cpp|\\.h|\\.go|\\.rs|\\.rb|" +
+                    "recursion|inheritance|polymorphism|encapsulation|abstraction|interface|abstract|" +
+                    "array|list|map|set|queue|stack|tree|graph|algorithm|data.*structure|" +
+                    "thread|concurrent|async|await|promise|callback|event|listener|" +
+                    "sql|database|query|table|index|transaction|" +
+                    "http|api|endpoint|request|response|json|xml|websocket|" +
+                    "design.*pattern|singleton|factory|observer|strategy|decorator|" +
+                    "memory|garbage.*collection|heap|stack|pointer|reference|" +
+                    "sort|search|binary.*search|merge|quick|bubble|insertion|" +
+                    "lambda|closure|stream|filter|map.*reduce|reduce|" +
+                    "try|catch|throw|throws|finally|assert|" +
+                    "static|final|private|public|protected|default|abstract|interface|" +
+                    "constructor|destructor|override|overload|polymorphic|" +
+                    "what is|what are|how to|how do|can you explain|help me understand|" +
+                    "teach me|learn|understand|concept|programming|language|syntax|" +
+                    "difference between|vs|versus|compared to)\\b",
                     java.util.regex.Pattern.CASE_INSENSITIVE);
 
     /**

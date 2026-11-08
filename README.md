@@ -81,7 +81,7 @@ Populate `acp.json` with the following structure:
       "command": "java",
       "args": [
         "-jar",
-        "/absolute/path/to/build/libs/test-all.jar"
+        "/absolute/path/to/build/libs/TeachingAgent.jar"
       ],
       "env": {
         "LLM_PROVIDER": "openai",

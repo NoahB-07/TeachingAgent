@@ -65,14 +65,16 @@ public final class LearningTools implements ToolSet {
 
     private final AcpIdeTools ide;
     private final McpConnections mcp;
+    private final TeachingProfile profile;
     /** Node ids loaded into the plugin this session (trees merge by id). */
     private final Set<String> loadedIds = ConcurrentHashMap.newKeySet();
     /** Steps in the walkthrough last played, or 0. */
     private volatile int walkthroughSteps;
 
-    LearningTools(AcpIdeTools ide, McpConnections mcp) {
+    LearningTools(AcpIdeTools ide, McpConnections mcp, TeachingProfile profile) {
         this.ide = ide;
         this.mcp = mcp;
+        this.profile = profile;
     }
 
     /** True if the plugin can be reached in this session, directly or through AIR's proxy. */
@@ -128,6 +130,8 @@ public final class LearningTools implements ToolSet {
             if (!blank(show_id)) args.put("show_id", show_id);
             String reply = send(SHOW_TREE, args);
             loadedIds.addAll(check.ids);
+            // Auto-log: extract file and node ids from the tree for the teaching profile.
+            autoLogTree(json, check.ids);
             return check.summary(reply, "Nodes and the code they highlight:");
         });
     }
@@ -166,6 +170,8 @@ public final class LearningTools implements ToolSet {
             if (!check.ok()) throw new IllegalArgumentException(check.errorText());
             String reply = send(PLAY_WALKTHROUGH, args("json", json));
             walkthroughSteps = check.echo.size();
+            // Auto-log: extract file and title from the walkthrough.
+            autoLogWalkthrough(json);
             return check.summary(reply, "Steps and the code they highlight:");
         });
     }
@@ -281,6 +287,294 @@ public final class LearningTools implements ToolSet {
 
     private static boolean blank(String s) {
         return s == null || s.isBlank();
+    }
+
+    // ---------------------------------------------------------------- auto-logging to teaching profile
+
+    /** Extract file and node ids from an explanation tree JSON and record them in the profile. */
+    private void autoLogTree(String json, Set<String> nodeIds) {
+        if (profile == null) return;
+        try {
+            String file = extractJsonString(json, "file");
+            String root = extractJsonString(json, "root");
+            // Use the root node id or the first node id as the topic label.
+            String topic = root;
+            if (topic == null || topic.isBlank()) {
+                if (!nodeIds.isEmpty()) {
+                    topic = nodeIds.iterator().next();
+                }
+            }
+            if (topic != null && !topic.isBlank()) {
+                profile.addTopic(topic, topic, file, new ArrayList<>(nodeIds));
+            }
+        } catch (Exception e) {
+            // Silently ignore — auto-log is best-effort.
+            System.err.println("[learning] Auto-log tree failed: " + e.getMessage());
+        }
+    }
+
+    /** Extract each walkthrough step and record it as a separate topic in the profile. */
+    private void autoLogWalkthrough(String json) {
+        if (profile == null) return;
+        try {
+            String file = extractJsonString(json, "file");
+            String title = extractJsonString(json, "title");
+
+            // Find the "steps" array and extract each step object individually
+            List<String> stepBlocks = extractStepBlocks(json);
+            int stepIndex = 0;
+            for (String stepJson : stepBlocks) {
+                stepIndex++;
+                // Extract fields from this step
+                String stepFile = extractJsonString(stepJson, "file");
+                if (stepFile == null || stepFile.isBlank()) {
+                    stepFile = file;
+                }
+
+                String stepKind = extractJsonString(stepJson, "kind");
+                String stepTitle = extractJsonString(stepJson, "title");
+                String stepNote = extractJsonString(stepJson, "note");
+                String stepLine = extractJsonPrimitive(stepJson, "line");
+                String stepOutput = extractJsonString(stepJson, "output");
+                List<String> stepVars = extractVarsKeys(stepJson);
+
+                // Build the topic label: what this step actually taught
+                // Priority: stepTitle > stepNote > kind + line
+                String topicLabel;
+                if (stepTitle != null && !stepTitle.isBlank()) {
+                    topicLabel = stepTitle;
+                } else if (stepNote != null && !stepNote.isBlank()) {
+                    topicLabel = stepNote;
+                } else if (stepKind != null && !stepKind.isBlank()) {
+                    topicLabel = stepKind;
+                } else {
+                    topicLabel = "step";
+                }
+
+                // Build the title for the profile entry
+                String profileTitle;
+                if (title != null && !title.isBlank()) {
+                    profileTitle = title + " (step " + stepIndex + ")";
+                } else {
+                    profileTitle = "Walkthrough step " + stepIndex;
+                }
+
+                // Collect nodes: exact details about what this step covered
+                List<String> nodes = new ArrayList<>();
+                if (stepLine != null && !stepLine.isBlank()) {
+                    nodes.add("line:" + stepLine);
+                }
+                if (stepKind != null && !stepKind.isBlank()) {
+                    nodes.add("kind:" + stepKind);
+                }
+                if (stepNote != null && !stepNote.isBlank()) {
+                    String note = stepNote.length() > 80 ? stepNote.substring(0, 80) : stepNote;
+                    nodes.add("note:" + note);
+                }
+                for (String v : stepVars) {
+                    nodes.add("variable:" + v);
+                }
+                if (stepOutput != null && !stepOutput.isBlank()) {
+                    String output = stepOutput.replace("\n", "\\n").replace("\r", "");
+                    if (output.length() > 80) output = output.substring(0, 80);
+                    nodes.add("output:" + output);
+                }
+
+                profile.addTopic(topicLabel, profileTitle, stepFile, nodes);
+            }
+        } catch (Exception e) {
+            System.err.println("[learning] Auto-log walkthrough failed: " + e.getMessage());
+        }
+    }
+
+    /** Extract individual step object blocks from the "steps" array in walkthrough JSON. */
+    private static List<String> extractStepBlocks(String json) {
+        List<String> blocks = new ArrayList<>();
+        // Find the "steps" array
+        String stepsSearch = "\"steps\"\\s*:\\s*\\[";
+        int stepsIdx = json.indexOf(stepsSearch);
+        if (stepsIdx == -1) return blocks;
+
+        // Find the opening bracket of the array
+        int arrayStart = stepsIdx + stepsSearch.length() - 1; // position of '['
+        int depth = 0;
+        int i = arrayStart;
+        int arrayEnd = -1;
+        while (i < json.length()) {
+            char c = json.charAt(i);
+            if (c == '[') depth++;
+            else if (c == ']') {
+                depth--;
+                if (depth == 0) {
+                    arrayEnd = i;
+                    break;
+                }
+            }
+            i++;
+        }
+        if (arrayEnd <= arrayStart) return blocks;
+
+        String arrayContent = json.substring(arrayStart + 1, arrayEnd);
+        // Now extract each object within the array
+        int objStart = 0;
+        while (objStart < arrayContent.length()) {
+            // Skip whitespace and commas
+            int pos = objStart;
+            while (pos < arrayContent.length() && (arrayContent.charAt(pos) == ' ' || arrayContent.charAt(pos) == '\n' || arrayContent.charAt(pos) == '\r' || arrayContent.charAt(pos) == '\t' || arrayContent.charAt(pos) == ',')) {
+                pos++;
+            }
+            if (pos >= arrayContent.length() || arrayContent.charAt(pos) != '{') break;
+
+            // Find the matching closing brace
+            int braceStart = pos;
+            int braceDepth = 0;
+            int braceEnd = -1;
+            int j = braceStart;
+            while (j < arrayContent.length()) {
+                char c = arrayContent.charAt(j);
+                if (c == '{') braceDepth++;
+                else if (c == '}') {
+                    braceDepth--;
+                    if (braceDepth == 0) {
+                        braceEnd = j;
+                        break;
+                    }
+                } else if (c == '"') {
+                    // Skip string literals to avoid counting braces inside strings
+                    j++;
+                    while (j < arrayContent.length()) {
+                        char sc = arrayContent.charAt(j);
+                        if (sc == '\\') j++;
+                        else if (sc == '"') break;
+                        j++;
+                    }
+                }
+                j++;
+            }
+            if (braceEnd > braceStart) {
+                blocks.add(arrayContent.substring(braceStart, braceEnd + 1));
+                objStart = braceEnd + 1;
+            } else {
+                break;
+            }
+        }
+        return blocks;
+    }
+
+    /** Extract variable names from the "vars" object in a single step JSON block. */
+    private static List<String> extractVarsKeys(String stepJson) {
+        List<String> vars = new ArrayList<>();
+        String search = "\"vars\"\\s*:\\s*{";
+        int idx = stepJson.indexOf(search);
+        if (idx == -1) return vars;
+
+        int braceStart = idx + search.length() - 1;
+        int depth = 0;
+        int i = braceStart;
+        int braceEnd = -1;
+        while (i < stepJson.length()) {
+            char c = stepJson.charAt(i);
+            if (c == '{') depth++;
+            else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    braceEnd = i;
+                    break;
+                }
+            }
+            i++;
+        }
+        if (braceEnd > braceStart) {
+            String varsBlock = stepJson.substring(braceStart + 1, braceEnd);
+            int keyIdx = 0;
+            while ((keyIdx = varsBlock.indexOf("\"", keyIdx)) != -1) {
+                int keyStart = keyIdx + 1;
+                int keyEnd = keyStart;
+                while (keyEnd < varsBlock.length()) {
+                    char c = varsBlock.charAt(keyEnd);
+                    if (c == '"') break;
+                    if (c == '\\') keyEnd++;
+                    keyEnd++;
+                }
+                if (keyEnd < varsBlock.length()) {
+                    String key = varsBlock.substring(keyStart, keyEnd);
+                    int afterKey = keyEnd + 1;
+                    while (afterKey < varsBlock.length() && (varsBlock.charAt(afterKey) == ' ' || varsBlock.charAt(afterKey) == '\t')) {
+                        afterKey++;
+                    }
+                    if (afterKey < varsBlock.length() && varsBlock.charAt(afterKey) == ':') {
+                        vars.add(key);
+                    }
+                    keyIdx = keyEnd + 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        return vars;
+    }
+
+    /** Extract a primitive value (number or string) for a given key from JSON. */
+    private static String extractJsonPrimitive(String json, String key) {
+        String pattern = "\"" + key + "\"\\s*:\\s*";
+        int idx = json.indexOf(pattern);
+        if (idx == -1) return null;
+        int pos = idx + pattern.length();
+        // Skip whitespace
+        while (pos < json.length() && (json.charAt(pos) == ' ' || json.charAt(pos) == '\t' || json.charAt(pos) == '\n' || json.charAt(pos) == '\r')) {
+            pos++;
+        }
+        if (pos >= json.length()) return null;
+        char c = json.charAt(pos);
+        if (c == '"') {
+            // String value
+            int start = pos + 1;
+            int end = start;
+            while (end < json.length()) {
+                char ch = json.charAt(end);
+                if (ch == '"') break;
+                if (ch == '\\') end++;
+                end++;
+            }
+            if (end >= json.length()) return null;
+            String value = json.substring(start, end);
+            return value.replace("\\\"", "\"").replace("\\\\", "\\").replace("\\n", "\n").replace("\\r", "\r").replace("\\t", "\t");
+        } else {
+            // Number or other primitive
+            int start = pos;
+            int end = pos;
+            while (end < json.length() && json.charAt(end) != ',' && json.charAt(end) != '}' && json.charAt(end) != ']' && json.charAt(end) != ' ' && json.charAt(end) != '\n' && json.charAt(end) != '\r' && json.charAt(end) != '\t') {
+                end++;
+            }
+            return json.substring(start, end);
+        }
+    }
+
+    /**
+     * Extract a string value for a given key from a JSON string using simple text search.
+     * This is a lightweight alternative to full JSON parsing for auto-logging.
+     */
+    private static String extractJsonString(String json, String key) {
+        // Look for "key":"value" pattern
+        String pattern = "\"" + key + "\"\\s*:\\s*\"";
+        int idx = json.indexOf(pattern);
+        if (idx == -1) return null;
+        int start = idx + pattern.length();
+        int end = start;
+        while (end < json.length()) {
+            char c = json.charAt(end);
+            if (c == '"') break;
+            if (c == '\\') end++; // skip escaped character
+            end++;
+        }
+        if (end >= json.length()) return null;
+        String value = json.substring(start, end);
+        // Unescape JSON strings
+        return value.replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t");
     }
 
     // ---------------------------------------------------------------- configuration and prompt

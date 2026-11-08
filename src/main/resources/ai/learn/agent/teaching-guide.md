@@ -205,6 +205,102 @@ node. Use `[label](https://...)` only for official docs.
 - Explain **why**, not just what: "`i <= 5` (not `< 5`) so that 5 is included."
 - Don't restate the code in words ("this line assigns x to y"). Say what it achieves.
 
+### Highlighting bigger areas
+
+**Always highlight the entire logical unit, not just one line.** When explaining a function, loop, 
+conditional, or any block of code, use a **multi-line range** that covers the whole area.
+
+| What the learner asks about | Range to use | Example |
+|---|---|---|
+| A function/method | The entire function from signature to closing brace | `"10-25"` |
+| A loop | The entire loop including the header and body | `"8-12"` |
+| An if/else block | The entire conditional including all branches | `"15-22"` |
+| A class | The entire class definition | `"1-50"` |
+| A single expression | Use column ranges for precision | `"12:5-12:30"` |
+
+**Bad** — highlighting only one line of a function:
+```json
+{ "range": "10", "title": "calculateTotal", "text": "This function calculates the total..." }
+```
+
+**Good** — highlighting the entire function:
+```json
+{ "range": "10-25", "title": "calculateTotal(items, discount)", "text": "This function calculates the total..." }
+```
+
+The learner should see the **whole block of code** you're explaining, not just the first line. 
+Use multi-line ranges for the root node (the main thing they asked about) and for child nodes 
+that cover logical chunks (loops, conditionals, calculations).
+
+### Explaining whole functions
+
+When the learner asks about a function, method, or "how does X work?", explain the **entire function** 
+as a cohesive unit before diving into individual lines. A function-level explanation should cover:
+
+1. **What it does**: The overall purpose in plain language. "This function calculates the total price 
+   by summing all items and applying a discount."
+2. **What it takes**: The parameters and what they represent. "It receives a list of items and a 
+   discount rate."
+3. **What it returns**: The return value and its meaning. "It returns the final price as a double."
+4. **How it works**: The high-level algorithm or logic flow. "It loops through each item, adds the 
+   price to a running total, then multiplies by (1 - discount)."
+5. **Side effects**: Any important side effects. "It also logs the transaction to a file."
+
+Structure the explanation tree with:
+- A **root node** covering the entire function range, with the complete function-level explanation.
+- **Child nodes** for key parts: parameters, return statement, loops, conditionals, or helper calls.
+- **Links** from the root to the parts it mentions, so the learner can explore deeper.
+
+Example for a function `calculateTotal(items, discount)` on lines 10-25:
+
+```json
+{
+  "file": "src/PriceCalculator.java",
+  "root": "calculateTotal",
+  "nodes": {
+    "calculateTotal": {
+      "range": "10-25",
+      "title": "calculateTotal(items, discount)",
+      "kind": "info",
+      "text": "This function **calculates the final price** after applying a discount.\n\n"
+        + "It takes a list of items and a discount rate, then:\n"
+        + "1. [Sums all item prices](#sum) to get a subtotal.\n"
+        + "2. [Applies the discount](#applyDiscount) by multiplying by (1 - discount).\n"
+        + "3. [Returns the final price](#return).\n\n"
+        + "For example, with items totaling $100 and a 20% discount, it returns $80."
+    },
+    "sum": {
+      "range": "12-16",
+      "title": "Summing item prices",
+      "text": "Loops through each item, adding its price to a running total. "
+        + "Starts at 0, so an empty list returns 0."
+    },
+    "applyDiscount": {
+      "range": "18-19",
+      "title": "Applying the discount",
+      "text": "Multiplies the subtotal by `(1 - discount)`. A discount of 0.2 (20%) means "
+        + "paying 80% of the original price."
+    },
+    "return": {
+      "range": "21",
+      "title": "Returning the result",
+      "text": "Returns the final price as a `double`. This is the value the caller receives."
+    }
+  }
+}
+```
+
+**Key principles for function explanations:**
+- **Start big, then go small**: Always explain the whole function first, then let the learner 
+  explore the parts.
+- **Highlight the whole block**: Use multi-line ranges so the learner sees the entire function, 
+  loop, or conditional — never just one line.
+- **Use the function's signature**: Mention the parameter names and types in your explanation.
+- **Connect to the bigger picture**: Briefly mention how this function fits into the larger program.
+- **Avoid line-by-line**: Don't explain every single line; focus on the logical chunks (loops, 
+  conditionals, calculations).
+- **Give a concrete example**: Show what the function does with specific inputs and outputs.
+
 ### Answering a question about a node
 
 When the learner asks about something shown, answer in the chat briefly and, if it helps, send a
@@ -271,16 +367,50 @@ call stack and output.
   "title": "Running main()",
   "file": "Main.java",
   "steps": [
-    { "line": 3,  "kind": "call", "title": "The program starts", "note": "Java runs `main()` first.", "stack": ["main()"] },
-    { "line": 8,  "note": "`i` starts at **1**.", "vars": { "i": "1" }, "substitute": ["i"] },
-    { "line": 11, "vars": { "i": "1" }, "substitute": ["i"], "output": "i = 1\n", "pause": true },
+    { "line": "3-13", "kind": "call", "title": "The program starts", "note": "Java runs `main()` first — the entire function is highlighted.", "stack": ["main()"] },
+    { "line": "8-12", "note": "The `for` loop runs from `i=1` to `i=5`.", "vars": { "i": "1" }, "substitute": ["i"] },
+    { "line": "11", "vars": { "i": "1" }, "substitute": ["i"], "output": "i = 1\n", "pause": true },
     { "line": "8-12", "title": "Four more passes", "vars": { "i": "5" }, "output": "i = 2\ni = 3\ni = 4\ni = 5\n" },
-    { "line": 13, "kind": "return", "note": "Done." }
+    { "line": "13", "kind": "return", "note": "Done." }
   ]
 }
 ```
 
 - Only `steps` and each step's `line` are required. `line` is a number or a `"start-end"` string.
+
+### Using multi-line ranges in walkthroughs
+
+**Highlight the entire logical unit, not just one line.** When a walkthrough step covers a function,
+loop, or conditional, use a **multi-line range** so the learner sees the whole block of code being
+executed, not just the current line.
+
+| What the step covers | `line` to use | Example |
+|---|---|---|
+| Entering a function | The entire function range | `"10-25"` |
+| A loop iteration | The entire loop body | `"8-12"` |
+| An if/else block | The entire conditional | `"15-22"` |
+| A single expression or variable | Single line | `11` |
+
+**Bad** — highlighting only the function signature line:
+```json
+{ "line": 3, "kind": "call", "title": "The program starts" }
+```
+
+**Good** — highlighting the entire function:
+```json
+{ "line": "3-13", "kind": "call", "title": "The program starts", "note": "Java runs main() first." }
+```
+
+The learner should see the **whole block of code** being executed at each step, not just one line.
+Use multi-line ranges for `call` steps (entering a function), loop steps, and any step that covers
+a logical chunk. Use a single-line `line` only when pointing at one specific expression, variable,
+or print statement.
+
+**Key principles for walkthrough ranges:**
+- **Enter a function**: Use the full function range, e.g. `"3-13"` for the entire `main()` method.
+- **Loop steps**: Use the full loop range (header + body), e.g. `"8-12"` for a `for` loop.
+- **Collapsed iterations**: When collapsing repeated loop passes, use the loop's range.
+- **Single-line only for specifics**: A print statement, a variable assignment, or a condition check.
 - **`vars` are the values before the line runs**, as display strings: `{"i": "1", "name": "\"Bo\""}`.
   A line that assigns `x` still shows the old `x`; the new value appears on the next step.
 - **`output` is only what this step prints.** It is added to the output so far: don't repeat it.
