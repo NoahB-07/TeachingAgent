@@ -1,0 +1,56 @@
+{
+  "nodes": {
+    "root": {
+      "title": "AcpTeachingAgent Explanation",
+      "content": "Overview of the AcpTeachingAgent class and its functions.",
+      "children": [
+        {
+          "title": "Session Management",
+          "content": "Handles creating, listing, loading, and closing sessions.",
+          "children": [
+            {
+              "title": "newSession",
+              "content": "Creates a new session with tools and settings."
+            },
+            {
+              "title": "listSessions",
+              "content": "Lists all active sessions and their details."
+            }
+          ]
+        },
+        {
+          "title": "Prompt Handling",
+          "content": "Processes user input and provides responses.",
+          "children": [
+            {
+              "title": "prompt",
+              "content": "Runs the Koog agent on user input within a session."
+            },
+            {
+              "title": "cancel",
+              "content": "Stops ongoing task in a session."
+            }
+          ]
+        },
+        {
+          "title": "ReAct Pattern",
+          "content": "Guide to think, act with tools, and observe results.",
+          "children": [
+            {
+              "title": "Reason",
+              "content": "Think about the next steps before taking action."
+            },
+            {
+              "title": "Action",
+              "content": "Use tools to perform tasks based on reasoning."
+            },
+            {
+              "title": "Observation",
+              "content": "Evaluate tool results to determine the next steps."
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
