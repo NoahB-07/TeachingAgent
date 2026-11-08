@@ -76,8 +76,7 @@ public class AcpTeachingAgent {
 
     /** Built per session, so the model knows where it runs and which project it works on. */
     private static String systemPrompt(String cwd, McpConnections mcp) {
-        boolean editor = LearningTools.available(mcp);
-        return basePrompt(cwd, editor) + mcpPrompt(mcp) + LearningTools.prompt(mcp) + reactInstructions(editor);
+        return basePrompt(cwd) + mcpPrompt(mcp) + LearningTools.prompt(mcp) + reactInstructions();
     }
 
     private static String mcpPrompt(McpConnections mcp) {
@@ -86,9 +85,9 @@ public class AcpTeachingAgent {
         }
         StringBuilder sb = new StringBuilder("""
 
-                The IDE also offers these MCP tools. Use them only for IDE features your own tools
-                don't cover (inspections, symbols, run configurations, the debugger). Never use them
-                to show explanations: the learning_* tools do that.
+                You are also connected to these MCP servers, provided by the IDE. Their tools give you
+                IDE features (such as code search, inspections, symbols, run configurations); prefer them
+                over the basic tools when they fit the task:
                 """);
         for (McpConnections.Connected server : mcp.connected()) {
             sb.append("- ").append(server.name()).append(": ")
@@ -97,42 +96,34 @@ public class AcpTeachingAgent {
         return sb.toString();
     }
 
-    private static String basePrompt(String cwd, boolean editor) {
-        String how = editor
-                ? """
-                You teach by showing the learner their own code in their editor, with explanations
-                they can click through and step-by-step walkthroughs. Whenever they ask about code,
-                that is how you answer: they never need to ask you to "show" it or name a tool.
-                The chat is only for short replies around what you show."""
-                : """
-                The editor tools are not connected in this session, so explain in the chat: quote
-                short snippets of the learner's code with their file and line numbers.""";
+    private static String basePrompt(String cwd) {
         return """
-                You are Air, a patient programming teacher running inside the learner's JetBrains IDE
-                (an ACP agent connected through JetBrains AIR). You help the learner understand their
-                own code. You never write, fix or complete it for them.
+                You are a patient teaching assistant, running as an ACP (Agent Client Protocol) agent
+                inside the user's JetBrains IDE (connected through JetBrains AIR).
 
-                %s
-
-                The learner's project is open in the IDE. Project root: %s
+                The user has a project open in the IDE. Project root: %s
                 Operating system: %s
 
-                Tools for finding and reading the project's code:
-                - search_code: the lines that contain some text (a method, class, variable, string).
-                  Start here to find the code a question is about.
-                - find_files: a file's path from its name or a glob (e.g. "Main.java").
-                - list_directory: the files and folders in a directory ("." for the project root).
-                - read_file_with_line_numbers: a file with 1-based line numbers. Use it before
-                  pointing at any lines.
-                - read_file: a file's text as the IDE sees it, including unsaved edits.
-                - write_file: create or overwrite a file, only inside the .teaching folder at the
-                  project root (never the learner's own code).
-                - run_command: run a shell command in the project root, if the IDE allows it.
+                You have tools that act on that project through the IDE:
+                - list_directory: list files and folders (use "." for the project root)
+                - find_files: find files by name or glob (e.g. "Main.java") and get their paths
+                - search_code: find the lines in the project that contain some text (a method,
+                  class, tool name or string), to locate the code a question is about
+                - read_file: read a file as the IDE sees it, including unsaved edits
+                - read_file_with_line_numbers: the same, with 1-based line numbers (use it before
+                  choosing ranges to highlight)
+                - write_file: create or overwrite a file (the IDE shows the change to the user)
+                - run_command: run a shell command in the project root in the IDE's terminal
 
-                Always find and read the code before explaining it. Never guess, invent file names,
-                describe code you haven't read, or ask the learner to paste code that is in the
-                project.
-                """.formatted(how, cwd, System.getProperty("os.name"));
+                When the user asks about "this project", "my code", a file, or how something in the
+                project works, find the code (search_code, find_files) and read it with your tools
+                instead of guessing or asking them to paste it. Never invent file names or describe
+                code you haven't read. Read a file before changing it.
+                Only write files if the file path is in the .teaching folder in the root of the project.
+
+                Explain concepts step by step always using learning tools, use examples from the user's own code where it helps,
+                and ask clarifying questions when needed.
+                """.formatted(cwd, System.getProperty("os.name"));
     }
 
     // ---------------------------------------------------------------- ReAct reasoning
@@ -148,16 +139,8 @@ public class AcpTeachingAgent {
      * </ol>
      * This cycle repeats until the agent has enough information to answer.
      */
-    private static String reactInstructions(boolean editor) {
-        String typical = editor
-                ? """
-
-                A typical answer: search_code / find_files to find the code, read_file_with_line_numbers
-                to read it, then one learning_* call to show it (a tree, a walkthrough or a highlight,
-                as "Choosing how to answer" says), then a 1-3 sentence chat reply.
-                """
-                : "";
-        return typical + """
+    private static String reactInstructions() {
+        return """
 
                 Work in a reason-act-observe cycle:
                 1. Think about what you know, what you still need, and which tool gets it.
@@ -272,13 +255,8 @@ public class AcpTeachingAgent {
 
         // Run the (blocking) Koog agent on another thread so a cancel can end the turn promptly.
         // The ACP session id doubles as the Koog session id, which keys ChatMemory.
-        // Say in the message itself how to answer (tree, walkthrough, highlight...): GPT-4o follows
-        // that far more reliably than the system prompt. The chat history keeps the learner's words.
-        String modelInput = LearningTools.available(session.mcp)
-                ? userText + TeachingIntent.classify(userText).directive()
-                : userText;
         CompletableFuture<String> run = CompletableFuture.supplyAsync(
-                () -> session.agent.run(modelInput, session.id));
+                () -> session.agent.run(userText, session.id));
         session.running = run;
         ctx.onCancel(() -> run.cancel(true));
 
@@ -454,21 +432,58 @@ public class AcpTeachingAgent {
             find_files to find the code this is about, then read_file_with_line_numbers).
             2. Send it with learning_show_explanation_tree or learning_play_walkthrough.
             3. Then reply with a short sentence about what you showed, without the JSON.""";
-    private static final String CHAT_CODE_NUDGE = """
-            Your answer explains code in the chat with code blocks, but you haven't shown anything in \
-            the learner's editor. If this is about code in their project, show it there instead (an \
-            explanation tree, a walkthrough or a highlight, as "Choosing how to answer" says, \
-            after finding and reading the code), then reply in 1-3 sentences without code blocks. If \
-            it really isn't about their project's code, give your answer again in a few sentences \
-            without code blocks.""";
+
+    /** Nudge to force the LLM to use a learning tool after researching code. */
+    private static final String LEARNING_TOOL_NUDGE = """
+            The learner asked about code. Before answering, show the code you found using a learning \
+            tool (highlight, explanation tree, or walkthrough) so the learner can see it in their \
+            editor. Use learning_highlight_code, learning_show_explanation_tree, or \
+            learning_play_walkthrough — whichever best fits what you found.""";
+
+    /** Keywords that suggest the user is asking about code. */
+    private static final java.util.regex.Pattern CODE_QUESTION_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "\\b(file|files|class|method|function|code|line|lines|project|folder|directory|import|package|" +
+                    "variable|loop|if|for|while|return|exception|error|bug|fix|debug|test|run|build|compile|" +
+                    "explain|how.*work|what.*do|where.*is|show.*me|read|search|find|look|code.*review|" +
+                    "\\.java|\\.kt|\\.py|\\.js|\\.ts|\\.c|\\.cpp|\\.h|\\.go|\\.rs|\\.rb)\\b",
+                    java.util.regex.Pattern.CASE_INSENSITIVE);
 
     /**
-     * ReAct agent loop: Thought → Action → Observation cycle.
+     * Checks if the user's input appears to be about code.
+     */
+    private static boolean isCodeRelated(String input) {
+        return CODE_QUESTION_PATTERN.matcher(input).find();
+    }
+
+    /**
+     * Checks if any of the tool calls are learning tools.
+     */
+    private static boolean containsLearningToolCall(List<MessagePart.Tool.Call> calls) {
+        for (MessagePart.Tool.Call call : calls) {
+            if (LearningTools.OWN_TOOL_NAMES.contains(call.getTool())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * ReAct agent loop with two-phase learning tool enforcement: Thought → Action → Observation cycle.
      *
      * <p>The LLM is prompted to reason (Thought), call tools (Action), and receive results
      * (Observation). After each tool execution, the results are fed back with an Observation
      * prompt so the LLM can reason about what to do next. This continues until the LLM provides
      * a final answer without calling more tools.
+     *
+     * <p>Two-phase approach for learning tools:
+     * <ol>
+     *   <li><b>Phase 1 (Research)</b>: The LLM freely uses any tools (search_code, read_file, etc.) to
+     *       find and understand the code.</li>
+     *   <li><b>Phase 2 (Enforce Learning Tool)</b>: After research completes (no more tool calls), if the
+     *       question was code-related and no learning tool was used, the LLM is forced to call a learning
+     *       tool before answering.</li>
+     * </ol>
      *
      * <p>This replaces Koog's {@code singleRunStrategy}, which ends the run as soon as a reply contains
      * text — even when that reply also calls a tool (GPT-4o often says "Let me search…" and calls a
@@ -479,13 +494,9 @@ public class AcpTeachingAgent {
     private static String runWithTools(AIAgentFunctionalContext ctx, String input, boolean learningTools) {
         Message.Assistant reply = ctx.requestLLM(input);
         int nudges = 0;
-        boolean showedInEditor = false;
-        boolean nudgedChatCode = false;
-        // The intent the message was tagged with (see TeachingIntent), if any.
-        int marker = input.indexOf(TeachingIntent.MARKER);
-        TeachingIntent intent = learningTools && marker >= 0
-                ? TeachingIntent.classify(input.substring(0, marker)) : TeachingIntent.CHAT;
-        boolean remindedEditor = false;
+        boolean learningToolUsed = false;
+
+        // Phase 1: Research loop — let the LLM freely use any tools to find and understand the code.
         for (int step = 0; step < MAX_TOOL_STEPS; step++) {
             List<MessagePart.Tool.Call> calls = toolCalls(reply);
             if (calls.isEmpty()) {
@@ -497,22 +508,27 @@ public class AcpTeachingAgent {
                     reply = ctx.requestLLM(PASTED_JSON_NUDGE);
                     continue;
                 }
-                if (intent.needsEditor() && !showedInEditor && !remindedEditor) {
-                    // The learner asked about code, but nothing was shown in the editor.
-                    remindedEditor = true;
-                    reply = ctx.requestLLM(intent.reminder());
-                    continue;
-                }
-                if (learningTools && !showedInEditor && !nudgedChatCode && answer.contains("```")) {
-                    // It explained code in the chat (code blocks) without showing anything in the editor.
-                    nudgedChatCode = true;
-                    reply = ctx.requestLLM(CHAT_CODE_NUDGE);
-                    continue;
+                // Phase 2: If learning tools are available, the question is code-related, and no learning
+                // tool was used during research, force the LLM to use a learning tool before answering.
+                if (learningTools && !learningToolUsed && isCodeRelated(input)) {
+                    reply = ctx.requestLLMOnlyCallingTools(LEARNING_TOOL_NUDGE);
+                    // Execute the forced learning tool call.
+                    List<MessagePart.Tool.Call> forcedCalls = toolCalls(reply);
+                    if (!forcedCalls.isEmpty()) {
+                        List<ai.koog.agents.core.environment.ReceivedToolResult> results =
+                                ctx.executeTools(forcedCalls, false);
+                        reply = ctx.sendToolResults(results);
+                        // Now get the final answer after showing the learning tool.
+                        return text(ctx.requestLLMWithoutTools(
+                                "You have shown the code using a learning tool. Now reply with a short " +
+                                "sentence about what you showed and where, without repeating the explanation."));
+                    }
                 }
                 return answer;
             }
-            if (calls.stream().anyMatch(c -> c.getTool().startsWith("learning_"))) {
-                showedInEditor = true;
+            // Track if any learning tool was called during this step.
+            if (containsLearningToolCall(calls)) {
+                learningToolUsed = true;
             }
             // Execute all tool calls from this Action step — returns ReceivedToolResult list
             List<ai.koog.agents.core.environment.ReceivedToolResult> results =
