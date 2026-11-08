@@ -39,7 +39,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@code session/new}; set {@code AIR_IDE_MCP_URL} to the URL from the IDE's
  * <i>Settings > Tools > MCP Server > Copy Config</i> to connect to it directly instead.
  */
-@LLMDescription("Tools to show explanations, highlights and walkthroughs in the learner's editor")
+@LLMDescription("Tools to show the learner their code in the editor: explanation trees, walkthroughs and highlights. "
+        + "Use them for every question about code.")
 public final class LearningTools implements ToolSet {
 
     static final String FORMAT_REFERENCE = "learning_get_format_reference";
@@ -90,9 +91,10 @@ public final class LearningTools implements ToolSet {
     }
 
     @Tool(customName = HIGHLIGHT)
-    @LLMDescription("Highlights a range of code in the editor, opening the file if needed, with an optional "
-            + "short Markdown note in a box above it. Replaces any explanation shown. Use it for a quick "
-            + "pointer; use learning_show_explanation_tree for anything worth exploring. "
+    @LLMDescription("Use when the learner asks WHERE something is (\"where is X?\", \"which line...?\", \"show me "
+            + "the loop\"). Highlights a range of code in their editor, opening the file if needed, with an "
+            + "optional one-sentence Markdown note in a box above it. Replaces any explanation shown. "
+            + "To explain code, use learning_show_explanation_tree instead. "
             + "Ranges are 1-based: \"12\", \"12-15\" or \"12:5-15:20\" (end column inclusive). "
             + "The result shows the code that was highlighted: check it is what you meant.")
     public String highlightCode(
@@ -109,8 +111,10 @@ public final class LearningTools implements ToolSet {
     }
 
     @Tool(customName = SHOW_TREE)
-    @LLMDescription("Loads an explanation tree into the editor and shows its root node (or show_id): the code "
-            + "is highlighted with a Markdown box above it, and the learner clicks links to go deeper. "
+    @LLMDescription("The default way to answer any request to explain, describe or help understand code (a file, "
+            + "class, method, block, or how a feature works), and to quiz the learner or answer follow-ups. "
+            + "Shows an explanation tree in their editor: the code is highlighted with a Markdown box above it, "
+            + "and the learner clicks links to go deeper. Find and read the code first. "
             + "Nodes merge by id with nodes sent earlier. Shape: {\"file\": \"src/Main.java\", \"root\": \"main\", "
             + "\"nodes\": {\"main\": {\"range\": \"3-13\", \"text\": \"It [loops](#loop).\"}, \"loop\": {\"range\": \"8-12\", "
             + "\"text\": \"...\"}}}. The result lists the code each node highlights: check it.")
@@ -148,7 +152,10 @@ public final class LearningTools implements ToolSet {
     }
 
     @Tool(customName = PLAY_WALKTHROUGH)
-    @LLMDescription("Plays a step-by-step walkthrough of a run of some code in the editor, replacing any playing. "
+    @LLMDescription("Use when the learner asks what happens when code RUNS: \"walk me through\", \"step through\", "
+            + "\"trace\", \"what does it print?\", \"what is x after...?\". Plays a step-by-step run of the code in "
+            + "their editor, with variables, call stack and output, replacing any playing. Trace the code yourself "
+            + "first to get real values. "
             + "Shape: {\"title\": \"Running main()\", \"file\": \"Main.java\", \"steps\": [{\"line\": 3, \"kind\": \"call\", "
             + "\"note\": \"...\", \"stack\": [\"main()\"]}, {\"line\": 8, \"vars\": {\"i\": \"1\"}, \"substitute\": [\"i\"]}]}. "
             + "\"vars\" are values BEFORE the line runs; \"output\" is only what that step prints. "
@@ -297,12 +304,7 @@ public final class LearningTools implements ToolSet {
     /** System prompt section for teaching with the plugin. */
     static String prompt(McpConnections mcp) {
         if (!available(mcp)) {
-            return """
-
-                    The learning plugin's tools (learning_*) are not connected in this session, so you
-                    cannot highlight code in the editor. Explain in the chat instead, quoting short
-                    snippets with their file and line numbers.
-                    """;
+            return ""; // the base prompt already says to explain in the chat
         }
         return "\n" + resource("teaching-guide.md");
     }
