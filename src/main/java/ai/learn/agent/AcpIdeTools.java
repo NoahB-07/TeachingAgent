@@ -68,6 +68,28 @@ public final class AcpIdeTools implements ToolSet {
         });
     }
 
+    @Tool(customName = "read_file_with_line_numbers")
+    @LLMDescription("Read a text file with 1-based line numbers in front of each line (\"12| code\"). "
+            + "Use it before choosing a line or column range to highlight or step through. "
+            + "The numbers and the \"| \" separator are not part of the file.")
+    public String readFileWithLineNumbers(@LLMDescription("Path of the file to read") String path) {
+        Path file = resolve(path);
+        return report("Read " + display(file), ToolKind.READ, file, () -> {
+            NegotiatedCapabilities caps = caps();
+            String text = caps != null && caps.supportsReadTextFile()
+                    ? ctx.readFile(file.toString())
+                    : Files.readString(file, StandardCharsets.UTF_8);
+            String[] lines = text.split("\r\n|\r|\n", -1);
+            int count = text.endsWith("\n") || text.endsWith("\r") ? lines.length - 1 : lines.length;
+            int width = String.valueOf(Math.max(count, 1)).length();
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < count; i++) {
+                sb.append(String.format("%" + width + "d| ", i + 1)).append(lines[i]).append('\n');
+            }
+            return sb.isEmpty() ? "(empty file)" : sb.toString();
+        });
+    }
+
     @Tool(customName = "write_file")
     @LLMDescription("Create or overwrite a text file in the project with the given full content. "
             + "Read the file first when changing an existing one, and always send the complete new content.")
@@ -127,7 +149,8 @@ public final class AcpIdeTools implements ToolSet {
     // ---------------------------------------------------------------- MCP tool calls
 
     /** Names of the tools defined in this class (so MCP tools with the same name are skipped). */
-    static final Set<String> OWN_TOOL_NAMES = Set.of("read_file", "write_file", "list_directory", "run_command");
+    static final Set<String> OWN_TOOL_NAMES = Set.of("read_file", "read_file_with_line_numbers",
+            "write_file", "list_directory", "run_command");
 
     /** Shows a call to a tool of an MCP server (e.g. the IDE's) in the chat, as it starts. */
     void mcpToolStarted(String toolCallId, String toolName, String argsJson) {
@@ -154,12 +177,12 @@ public final class AcpIdeTools implements ToolSet {
 
     // ---------------------------------------------------------------- helpers
 
-    private interface Action {
+    interface Action {
         String run() throws Exception;
     }
 
     /** Runs a tool action, reporting it to the client as a tool call (pending → completed/failed). */
-    private String report(String title, ToolKind kind, Path location, Action action) {
+    String report(String title, ToolKind kind, Path location, Action action) {
         SyncPromptContext c = ctx;
         String id = "tool-" + UUID.randomUUID();
         List<ToolCallLocation> locations = location == null ? null

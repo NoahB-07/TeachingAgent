@@ -76,7 +76,7 @@ public class AcpTeachingAgent {
 
     /** Built per session, so the model knows where it runs and which project it works on. */
     private static String systemPrompt(String cwd, McpConnections mcp) {
-        return basePrompt(cwd) + mcpPrompt(mcp) + reactInstructions();
+        return basePrompt(cwd) + mcpPrompt(mcp) + LearningTools.prompt(mcp) + reactInstructions();
     }
 
     private static String mcpPrompt(McpConnections mcp) {
@@ -107,6 +107,8 @@ public class AcpTeachingAgent {
                 You have tools that act on that project through the IDE:
                 - list_directory: list files and folders (use "." for the project root)
                 - read_file: read a file as the IDE sees it, including unsaved edits
+                - read_file_with_line_numbers: the same, with 1-based line numbers (use it before
+                  choosing ranges to highlight)
                 - write_file: create or overwrite a file (the IDE shows the change to the user)
                 - run_command: run a shell command in the project root in the IDE's terminal
 
@@ -212,7 +214,9 @@ public class AcpTeachingAgent {
         String sessionId = UUID.randomUUID().toString();
         AcpIdeTools tools = new AcpIdeTools(request.cwd());
         // Connect to the MCP servers the client passed (with AIR + use_idea_mcp: the IDE's own server).
-        McpConnections mcp = McpConnections.connect(request.mcpServers(), AcpIdeTools.OWN_TOOL_NAMES);
+        // AIR_IDE_MCP_URL adds the IDE's server when the client doesn't pass it (for the learning_* tools).
+        McpConnections mcp = McpConnections.connect(
+                LearningTools.withConfiguredServer(request.mcpServers()), AcpIdeTools.OWN_TOOL_NAMES);
         AIAgent<String, String> agent;
         try {
             agent = createKoogAgent(request.cwd(), tools, mcp);
@@ -353,7 +357,12 @@ public class AcpTeachingAgent {
     }
 
     private AIAgent<String, String> createKoogAgent(String cwd, AcpIdeTools tools, McpConnections mcp) {
-        ToolRegistry registry = ToolRegistry.builder().tools(tools).tools(mcp.tools()).build();
+        var registryBuilder = ToolRegistry.builder().tools(tools).tools(mcp.tools());
+        if (LearningProxyTools.needed(mcp)) {
+            // AIR hides the IDE's tools behind execute_tool: add typed learning_* tools that call it.
+            registryBuilder.tools(new LearningProxyTools(mcp, tools));
+        }
+        ToolRegistry registry = registryBuilder.build();
         return AIAgent.builder()
                 .promptExecutor(executor())
                 .llmModel(MODEL)
@@ -370,7 +379,12 @@ public class AcpTeachingAgent {
                     });
                     events.onToolCallCompleted(e -> {
                         if (mcp.hasTool(e.getToolName())) {
-                            tools.mcpToolFinished(callId(e.getToolCallId(), e.getToolName()), true, null);
+                            // An MCP error (e.g. the learning plugin rejecting a tree) still "completes"
+                            // in Koog; the model sees the message, and the chat should show it failed.
+                            String result = String.valueOf(e.getToolResult());
+                            boolean failed = result.replace(" ", "").contains("\"isError\":true");
+                            tools.mcpToolFinished(callId(e.getToolCallId(), e.getToolName()), !failed,
+                                    failed ? result : null);
                         }
                     });
                     events.onToolCallFailed(e -> {
@@ -412,15 +426,11 @@ public class AcpTeachingAgent {
             // Execute all tool calls from this Action step — returns ReceivedToolResult list
             List<ai.koog.agents.core.environment.ReceivedToolResult> results =
                     ctx.executeTools(calls, false);
-            // Send tool results to the LLM (writes to history and requests a response)
+            // Send the tool results (the Observation) to the LLM; its reply is the next Thought/Action.
+            // Every tool call in that reply must be answered before any other message is sent, or
+            // OpenAI rejects the request ("tool_calls must be followed by tool messages"), so the
+            // loop goes straight back to executing them.
             reply = ctx.sendToolResults(results);
-            // If the LLM still wants to call tools, prompt it to reason about the observations
-            List<MessagePart.Tool.Call> nextCalls = toolCalls(reply);
-            if (!nextCalls.isEmpty()) {
-                // Format the observations and prompt for the next Thought
-                String observations = formatObservations(results);
-                reply = ctx.requestLLM("Observation: " + observations + "\n\nThought:");
-            }
         }
         // Out of steps: answer the pending calls one last time, then insist on a plain answer.
         List<MessagePart.Tool.Call> pending = toolCalls(reply);
@@ -429,28 +439,6 @@ public class AcpTeachingAgent {
         }
         return text(ctx.requestLLMWithoutTools(
                 "You have used the maximum number of tool steps. Answer now with what you have found."));
-    }
-
-    /**
-     * Formats tool results as Observation text for the ReAct loop.
-     * Each tool result is labeled with the tool name for clarity.
-     */
-    private static String formatObservations(
-            List<ai.koog.agents.core.environment.ReceivedToolResult> results) {
-        if (results.isEmpty()) {
-            return "(no results)";
-        }
-        if (results.size() == 1) {
-            ai.koog.agents.core.environment.ReceivedToolResult result = results.get(0);
-            return result.getOutput() != null ? result.getOutput() : "(empty result)";
-        }
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < results.size(); i++) {
-            ai.koog.agents.core.environment.ReceivedToolResult result = results.get(i);
-            if (i > 0) sb.append("\n\n---\n\n");
-            sb.append(result.getOutput() != null ? result.getOutput() : "(empty result)");
-        }
-        return sb.toString();
     }
 
     private static List<MessagePart.Tool.Call> toolCalls(Message.Assistant reply) {

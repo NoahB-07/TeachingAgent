@@ -3,6 +3,16 @@ package ai.learn.agent;
 import ai.koog.agents.core.tools.ToolBase;
 import ai.koog.agents.core.tools.ToolRegistry;
 import ai.koog.agents.mcp.DefaultMcpToolDescriptorParser;
+import ai.koog.agents.mcp.McpTool;
+import ai.koog.serialization.JSONObject;
+import ai.koog.serialization.kotlinx.KotlinxJSONElementMappersKt;
+import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult;
+import io.modelcontextprotocol.kotlin.sdk.types.TextContent;
+import kotlinx.serialization.json.JsonElement;
+import kotlinx.serialization.json.JsonElementKt;
+import kotlinx.serialization.json.JsonObject;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import ai.koog.agents.mcp.McpToolRegistryProvider;
 import ai.koog.agents.mcp.McpToolRegistryProvider_jvmKt;
 import ai.koog.agents.mcp.metadata.McpServerInfo;
@@ -99,6 +109,38 @@ final class McpConnections implements AutoCloseable {
 
     boolean hasTool(String toolName) {
         return tools.stream().anyMatch(t -> t.getName().equals(toolName));
+    }
+
+    /** The outcome of calling an MCP tool directly (not through the LLM). */
+    record CallResult(boolean error, String text) {
+    }
+
+    /**
+     * Calls one of the connected MCP tools with the given arguments and waits for its result.
+     * Used for AIR's {@code execute_tool} proxy, which Air's own wrapper tools call.
+     */
+    CallResult call(String toolName, Map<String, String> args) throws Exception {
+        ToolBase<?, ?> tool = tools.stream().filter(t -> t.getName().equals(toolName)).findFirst()
+                .orElseThrow(() -> new IllegalStateException("MCP tool '" + toolName + "' is not connected"));
+        if (!(tool instanceof McpTool mcpTool)) {
+            throw new IllegalStateException("'" + toolName + "' is not an MCP tool");
+        }
+        Map<String, JsonElement> fields = new LinkedHashMap<>();
+        args.forEach((k, v) -> fields.put(k, JsonElementKt.JsonPrimitive(v)));
+        JSONObject koogArgs = (JSONObject) KotlinxJSONElementMappersKt.toKoogJSONElement(new JsonObject(fields));
+        CallToolResult result = (CallToolResult) BuildersKt.runBlocking(EmptyCoroutineContext.INSTANCE,
+                (scope, cont) -> mcpTool.execute(koogArgs, cont));
+        StringBuilder text = new StringBuilder();
+        if (result != null && result.getContent() != null) {
+            for (Object block : result.getContent()) {
+                if (block instanceof TextContent t && t.getText() != null) {
+                    if (!text.isEmpty()) text.append('\n');
+                    text.append(t.getText());
+                }
+            }
+        }
+        boolean error = result == null || Boolean.TRUE.equals(result.isError());
+        return new CallResult(error, text.toString());
     }
 
     @Override
