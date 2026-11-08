@@ -178,7 +178,69 @@ final class LearningChecks {
             r.warnings.add("These links point at nodes you haven't defined: #" + String.join(", #", missingLinks)
                     + ". They won't open until you send a tree that defines them (trees merge by id).");
         }
+        checkLinkStructure(r, nodes, root, showId);
         return r;
+    }
+
+    /**
+     * A tree is meant to be explored by clicking links in the text. Rejects trees whose root has no
+     * inline links (a chain of Next arrows, or a single wall of text with loose nodes) and trees with
+     * nodes that can't be reached from the root at all.
+     */
+    private void checkLinkStructure(Report r, JsonObject nodes, String rootId, String showId) {
+        String root = rootId != null ? rootId : nodes.keySet().iterator().next();
+        if (nodes.size() < 2 || !(nodes.get(root) instanceof JsonObject rootNode)) {
+            return; // a single node, or a follow-up tree hanging off nodes sent earlier
+        }
+        Map<String, Set<String>> edges = new HashMap<>();
+        for (Map.Entry<String, JsonElement> e : nodes.entrySet()) {
+            if (!(e.getValue() instanceof JsonObject node)) continue;
+            Set<String> out = new LinkedHashSet<>(inlineLinks(node));
+            String next = string(node.get("next"));
+            if (next != null) out.add(next);
+            edges.put(e.getKey(), out);
+        }
+        Set<String> rootLinks = new LinkedHashSet<>(inlineLinks(rootNode));
+        rootLinks.retainAll(nodes.keySet());
+        if (rootLinks.isEmpty()) {
+            r.errors.add("Root node '" + root + "' has no links to the other nodes in its text. Write the links "
+                    + "into the sentences, on the words that name each part, e.g. \"It [reads the file](#read), then "
+                    + "[counts the lines](#count).\" The learner explores by clicking those words. Don't rely on "
+                    + "\"next\" arrows (only for a guided tour the learner asked for).");
+            return;
+        }
+        Set<String> reached = new LinkedHashSet<>();
+        java.util.ArrayDeque<String> queue = new java.util.ArrayDeque<>(List.of(root));
+        if (showId != null && !showId.isBlank()) queue.add(showId);
+        while (!queue.isEmpty()) {
+            String id = queue.poll();
+            if (!reached.add(id)) continue;
+            queue.addAll(edges.getOrDefault(id, Set.of()));
+        }
+        List<String> orphans = nodes.keySet().stream().filter(id -> !reached.contains(id)).toList();
+        if (!orphans.isEmpty()) {
+            r.errors.add("Nodes " + String.join(", ", orphans) + " can't be reached from the root. Link to each one "
+                    + "inline, with [words](#id), from the text of the node where it is mentioned.");
+        }
+    }
+
+    /** The #ids a node's text, hints and answer link to. */
+    private static Set<String> inlineLinks(JsonObject node) {
+        Set<String> ids = new LinkedHashSet<>();
+        List<String> texts = new ArrayList<>();
+        texts.add(string(node.get("text")));
+        texts.add(string(node.get("answer")));
+        if (node.get("hints") instanceof JsonArray hints) {
+            for (JsonElement h : hints) texts.add(string(h));
+        }
+        for (String t : texts) {
+            if (t == null) continue;
+            Matcher m = LINK.matcher(t);
+            while (m.find()) {
+                if (m.group(2).startsWith("#")) ids.add(m.group(2).substring(1));
+            }
+        }
+        return ids;
     }
 
     // ---------------------------------------------------------------- walkthroughs

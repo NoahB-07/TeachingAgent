@@ -16,8 +16,13 @@ enum TeachingIntent {
 
     /** Explain, describe, "how does X work": an explanation tree. */
     EXPLAIN(LearningTools.SHOW_TREE, """
-            show it in the learner's editor as an explanation tree: a root node for what they asked \
-            about, linking to its parts"""),
+            show it in the learner's editor as an explanation tree the learner explores by clicking. \
+            The root node says in 1-3 sentences what the code is for, with inline links on the words \
+            that name each of its 2-5 parts, e.g. "It [reads the file](#read), then [counts the \
+            lines](#count)." Each part's node explains that part and links on, the same way, to the \
+            ideas it uses (a method it calls, a variable, a concept), 2-3 levels deep. Every node is \
+            reached by a link in the text; don't chain nodes with "next" (that is only for a guided \
+            tour the learner asked for)"""),
     /** "Walk me through", "what does it print": a walkthrough. */
     WALKTHROUGH(LearningTools.PLAY_WALKTHROUGH, """
             show it in the learner's editor as a step-by-step walkthrough, with variables, call stack \
@@ -27,8 +32,10 @@ enum TeachingIntent {
             highlight that code in the learner's editor with a one-sentence note"""),
     /** "Quiz me": a tree of question nodes. */
     QUIZ(LearningTools.SHOW_TREE, """
-            show a quiz in the learner's editor: an explanation tree whose nodes are "kind": \
-            "question" on the relevant code, each with 1-3 hints and an answer"""),
+            show a quiz in the learner's editor: an explanation tree whose root introduces the code \
+            in a sentence or two and links inline to 2-4 "kind": "question" nodes on the relevant \
+            code (e.g. "Try [what the loop prints](#q1) and [when it stops](#q2)."), each with 1-3 \
+            hints and an answer; hints and answers can link to nodes that explain the idea"""),
     /** Greetings, thanks, "what can you do": a chat reply. */
     CHAT(null, null);
 

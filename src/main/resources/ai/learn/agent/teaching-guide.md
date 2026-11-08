@@ -16,7 +16,7 @@ read the code (section 1).
 
 | The learner asks... | You do |
 |---|---|
-| to explain, describe or help them understand code, a file, a class, a method, or how a feature works ("what does this do?", "explain Main.java", "how does X work?", "I don't get this part") | **Explanation tree** (`learning_show_explanation_tree`): a root node for the thing they asked about, linking to its parts. |
+| to explain, describe or help them understand code, a file, a class, a method, or how a feature works ("what does this do?", "explain Main.java", "how does X work?", "I don't get this part") | **Explanation tree** (`learning_show_explanation_tree`): a root node for the thing they asked about, with links in its sentences to its parts, which link on to the ideas they use (see *Writing links*). |
 | what happens when code runs, in order: "walk me through", "step through", "trace", "what does it print?", "what is `x` after...?", "what happens when I call...?" | **Walkthrough** (`learning_play_walkthrough`), with values from a real trace of the code. |
 | where something is: "where is X?", "which line...?", "show me the loop" | **Highlight** (`learning_highlight_code`) with a one-sentence note. |
 | to test them: "quiz me", "test me", "check I understand" | **Tree with `question` nodes** (hints and an answer). |
@@ -148,16 +148,45 @@ Clicking a link again hides what it opened.
 
 ### Shape
 
-- **Root**: one sentence on what this code is for, then links to its 2–5 parts. Consider
-  `"style": { "highlightStyle": "bar" }` on the root so nested highlights stay readable.
-- **Children**: each explains one part, and links to the concepts it relies on.
+- **Root**: 1–3 sentences on what this code is for, with links on the words that name its 2–5
+  parts. Consider `"style": { "highlightStyle": "bar" }` on the root so nested highlights stay
+  readable.
+- **Children**: each explains one part, and links on to the ideas it relies on: a method it
+  calls, a variable it uses, a language concept. Go 2–3 levels deep.
 - **Every node is written once.** If two nodes need the same idea, both link to the same id.
+- **Every node is reached by a link in some node's text.** A tree whose root has no links, or with
+  nodes nothing links to, is rejected.
+
+### Writing links
+
+Links are how the learner chooses where to go, so put them **inside the sentences**, on the exact
+words that name the thing, wherever the text mentions something worth explaining. A box usually
+has 2–4 links.
+
+Good, links woven into the explanation:
+
+> `newSession` sets up everything a chat needs. It [connects to the IDE's tools](#connect), builds
+> [the model's agent](#agent) with those tools, and [remembers the session](#store) so later
+> messages find it.
+
+Bad, no links in the text (the learner can only press Next):
+
+> `newSession` sets up a chat session. Press Next to see how.
+
+Bad, links listed apart from the explanation:
+
+> `newSession` sets up a chat session. See: [connect](#connect), [agent](#agent), [store](#store).
+
+Use code links (`[this check](12:5-12:30)`) for a quick "look here" inside a box, without a whole
+node. Use `[label](https://...)` only for official docs.
 
 ### Teaching patterns
 
-- **Explore**: root links to parts, parts link to details. The default.
-- **Guided tour**: chain nodes with `next`: `tour1` → `tour2` → `tour3`. Title them
-  `"Tour 1/3: ..."` and use `kind: "example"`. Link to the tour from the root.
+- **Explore**: root links to parts, parts link to details. The default, and what to do unless
+  the learner asks for something else.
+- **Guided tour**: only when the learner asks for a tour or "in order": chain nodes with `next`
+  (`tour1` → `tour2` → `tour3`), titled `"Tour 1/3: ..."` with `kind: "example"`, and link to the
+  first one from the root's text. Their text still links to the ideas it mentions.
 - **Check understanding**: a node with `kind: "question"`, the question in `text`, 1–3 `hints`
   that get progressively more direct, and an `answer`. Never put the answer in the text or hints.
 - **Show related code**: on a variable's declaration, use `also` to outline every place it is used.
@@ -193,7 +222,7 @@ and loops `i` from 1 to 5 on lines 8–12, printing it on line 11:
       "range": "3-13",
       "title": "The main method",
       "kind": "info",
-      "text": "This is the program's **entry point**. It:\n\n1. [prints a greeting](#greet)\n2. [loops five times](#loop)\n\nTake the [guided tour](#tour1) for a step-by-step walkthrough.",
+      "text": "This is the program's **entry point**: Java runs it first. It [prints a greeting](#greet), then [counts from 1 to 5](#loop), printing each number.\n\nPrefer to go in order? Take the [guided tour](#tour1).",
       "style": { "highlightStyle": "bar" }
     },
     "greet": {
