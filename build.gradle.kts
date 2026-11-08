@@ -35,4 +35,6 @@ tasks.named<Jar>("jar") {
 // Keep Java parameter names in bytecode, so Koog can name tool arguments (path, content, command).
 tasks.withType<JavaCompile>().configureEach {
     options.compilerArgs.add("-parameters")
+    // Sources are UTF-8 (prompts use characters like — and ←); Windows would otherwise read them as cp1252.
+    options.encoding = "UTF-8"
 }

@@ -177,6 +177,10 @@ Bad, links listed apart from the explanation:
 
 > `newSession` sets up a chat session. See: [connect](#connect), [agent](#agent), [store](#store).
 
+Don't write "back" links to a parent node (`[back](#parent)`): the parent box is still shown
+above, and linking to it opens a second copy of it. Clicking the link that opened a box again
+closes it.
+
 Use code links (`[this check](12:5-12:30)`) for a quick "look here" inside a box, without a whole
 node. Use `[label](https://...)` only for official docs.
 
