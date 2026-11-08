@@ -5,8 +5,38 @@ An ACP (Agent Client Protocol) teaching assistant that runs inside JetBrains IDE
 ## Prerequisites
 
 - **Java 17+** (for building the agent)
-- **OpenAI API key** (set as the `OPENAI_API_KEY` environment variable)
+- **LLM API key** for your chosen provider (OpenAI, Anthropic, Google, etc.)
 - **JetBrains IDE** with AI Assistant / Junie support (IntelliJ IDEA, PyCharm, WebStorm, etc.)
+
+## Choosing an AI Backend
+
+The agent supports multiple LLM providers. Configure them using environment variables in `acp.json`:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LLM_PROVIDER` | Provider name: `openai`, `anthropic`, `google`, etc. | `openai` |
+| `LLM_MODEL` | Model name (e.g. `gpt-4o`, `claude-sonnet-4-20250514`) | `gpt-4o` |
+| `LLM_API_KEY` | API key (generic, works for any provider) | *(required)* |
+
+You can also use provider-specific key variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GOOGLE_API_KEY`.
+
+### Example: Anthropic Claude
+
+```json
+"env": {
+  "LLM_PROVIDER": "anthropic",
+  "LLM_MODEL": "claude-sonnet-4-20250514",
+  "ANTHROPIC_API_KEY": "your-anthropic-api-key-here"
+}
+```
+
+### Example: OpenAI GPT-4o (default)
+
+```json
+"env": {
+  "OPENAI_API_KEY": "your-openai-api-key-here"
+}
+```
 
 ## Building
 
@@ -54,7 +84,9 @@ Populate `acp.json` with the following structure:
         "/absolute/path/to/build/libs/test-all.jar"
       ],
       "env": {
-        "OPENAI_API_KEY": "your-openai-api-key-here"
+        "LLM_PROVIDER": "openai",
+        "LLM_MODEL": "gpt-4o",
+        "LLM_API_KEY": "your-api-key-here"
       }
     }
   }
@@ -67,13 +99,13 @@ Populate `acp.json` with the following structure:
 |-------|-------------|
 | `command` | The executable to launch the agent. Use `"java"` to run the JAR. |
 | `args` | Arguments passed to the command. Include `-jar` and the **absolute path** to the built JAR. |
-| `env` | Environment variables for the agent process. At minimum, set `OPENAI_API_KEY`. |
+| `env` | Environment variables for the agent process. Set `LLM_API_KEY` (or a provider-specific key like `OPENAI_API_KEY`). Optionally set `LLM_PROVIDER` and `LLM_MODEL` to change the backend. |
 | `use_idea_mcp` | Set to `true` to connect the IDE's built-in MCP server, giving the agent access to IDE tools (code search, file reading, etc.). |
 
 ### Important notes
 
 - **Use absolute paths** for the `command` and JAR path. The IDE runs with a restricted `PATH` and may not resolve relative paths.
-- **Replace** `your-openai-api-key-here` with your actual OpenAI API key, or rely on the key being set in your shell environment.
+- **Replace** `your-api-key-here` with your actual API key. See the "Choosing an AI Backend" section above for provider-specific examples.
 - After saving `acp.json`, the agent should appear in AI Chat immediately. If it doesn't, restart the IDE.
 
 ## Using the Agent
@@ -112,7 +144,8 @@ src/main/java/ai/learn/agent/
 - Restart the IDE.
 
 **Agent fails to start:**
-- Check that `OPENAI_API_KEY` is set and valid.
+- Check that an API key is set (`LLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
+- If using a non-OpenAI provider, verify `LLM_PROVIDER` is set correctly.
 - Ensure the JAR was built successfully (`./gradlew build`).
 - Look for error messages in the IDE's event log or run the JAR manually: `java -jar build/libs/test-all.jar` to see startup errors.
 

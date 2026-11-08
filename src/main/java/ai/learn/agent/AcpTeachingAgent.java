@@ -6,8 +6,8 @@ import ai.koog.agents.core.agent.context.AIAgentFunctionalContext;
 import ai.koog.agents.core.tools.ToolRegistry;
 import ai.koog.agents.features.eventHandler.feature.EventHandler;
 import ai.koog.http.client.ktor.KtorKoogHttpClient;
-import ai.koog.prompt.executor.clients.openai.OpenAILLMClient;
 import ai.koog.prompt.executor.llms.MultiLLMPromptExecutor;
+import ai.koog.prompt.executor.llms.all.SimplePromptExecutors;
 import ai.koog.prompt.llm.LLMCapability;
 import ai.koog.prompt.llm.LLMProvider;
 import ai.koog.prompt.llm.LLModel;
@@ -161,15 +161,58 @@ public class AcpTeachingAgent {
                 """;
     }
 
-    private static final LLModel MODEL = new LLModel(
-            LLMProvider.OpenAI,
-            "gpt-4o",
-            List.of(
-                    LLMCapability.Completion.INSTANCE,
-                    LLMCapability.Tools.INSTANCE,
-                    LLMCapability.OpenAIEndpoint.Completions.INSTANCE
-            )
-    );
+    /**
+     * Resolves the LLM model from environment variables.
+     *
+     * <p>Supported environment variables:
+     * <ul>
+     *   <li>{@code LLM_PROVIDER} — provider identifier (e.g. "openai", "anthropic", "google").
+     *   Defaults to "openai" if not set.</li>
+     *   <li>{@code LLM_MODEL} — model name (e.g. "gpt-4o", "claude-sonnet-4-20250514").
+     *   Defaults to "gpt-4o" if not set.</li>
+     * </ul>
+     *
+     * <p>For the API key, use the provider-specific variable (e.g. {@code OPENAI_API_KEY},
+     * {@code ANTHROPIC_API_KEY}, {@code GOOGLE_API_KEY}) or the generic {@code LLM_API_KEY}.
+     */
+    private static LLMProvider resolveProvider(String name) {
+        String normalized = name.trim().toLowerCase(java.util.Locale.ROOT);
+        if (normalized.equals("openai")) return LLMProvider.OpenAI;
+        if (normalized.equals("anthropic")) return LLMProvider.Anthropic;
+        if (normalized.equals("google")) return LLMProvider.Google;
+        if (normalized.equals("deepseek")) return LLMProvider.DeepSeek;
+        if (normalized.equals("openrouter")) return LLMProvider.OpenRouter;
+        if (normalized.equals("ollama")) return LLMProvider.Ollama;
+        return null;
+    }
+
+    private static LLModel resolveModel() {
+        String providerName = System.getenv("LLM_PROVIDER");
+        if (providerName == null || providerName.isBlank()) {
+            providerName = "openai";
+        }
+        LLMProvider provider = resolveProvider(providerName);
+        if (provider == null) {
+            throw new AcpProtocolException(AcpErrorCodes.INTERNAL_ERROR,
+                    "Unknown LLM provider: " + providerName
+                    + ". Set LLM_PROVIDER to a valid provider (e.g. openai, anthropic, google).");
+        }
+        String modelName = System.getenv("LLM_MODEL");
+        if (modelName == null || modelName.isBlank()) {
+            modelName = "gpt-4o";
+        }
+        return new LLModel(
+                provider,
+                modelName,
+                List.of(
+                        LLMCapability.Completion.INSTANCE,
+                        LLMCapability.Tools.INSTANCE,
+                        LLMCapability.OpenAIEndpoint.Completions.INSTANCE
+                )
+        );
+    }
+
+    private static final LLModel MODEL = resolveModel();
 
     /** One conversational turn, kept so {@code session/load} can replay the conversation. */
     private record Turn(boolean fromUser, String text) {
@@ -566,25 +609,73 @@ public class AcpTeachingAgent {
         return "mcp-" + (toolCallId != null ? toolCallId : toolName);
     }
 
+    /**
+     * Resolves the API key from environment variables.
+     *
+     * <p>Tries the following variables in order:
+     * <ol>
+     *   <li>{@code LLM_API_KEY} — generic key for any provider</li>
+     *   <li>{@code OPENAI_API_KEY} — OpenAI-specific key</li>
+     *   <li>{@code ANTHROPIC_API_KEY} — Anthropic-specific key</li>
+     *   <li>{@code GOOGLE_API_KEY} — Google-specific key</li>
+     * </ol>
+     */
+    private static String resolveApiKey() {
+        String key = System.getenv("LLM_API_KEY");
+        if (key != null && !key.isBlank()) return key;
+        key = System.getenv("OPENAI_API_KEY");
+        if (key != null && !key.isBlank()) return key;
+        key = System.getenv("ANTHROPIC_API_KEY");
+        if (key != null && !key.isBlank()) return key;
+        return System.getenv("GOOGLE_API_KEY");
+    }
+
     private MultiLLMPromptExecutor executor() {
         MultiLLMPromptExecutor executor = promptExecutor;
         if (executor == null) {
             synchronized (this) {
                 executor = promptExecutor;
                 if (executor == null) {
-                    String apiKey = System.getenv("OPENAI_API_KEY");
+                    String apiKey = resolveApiKey();
                     if (apiKey == null || apiKey.isBlank()) {
                         // Reported to the client as the error of session/new.
                         throw new AcpProtocolException(AcpErrorCodes.INTERNAL_ERROR,
-                                "OPENAI_API_KEY environment variable is not set for the agent process.");
+                                "LLM API key is not set. Set one of: LLM_API_KEY, OPENAI_API_KEY, " +
+                                "ANTHROPIC_API_KEY, or GOOGLE_API_KEY environment variables.");
                     }
-                    var openAIClient = new OpenAILLMClient(apiKey, new KtorKoogHttpClient.Factory());
-                    executor = new MultiLLMPromptExecutor(openAIClient);
+                    String providerName = System.getenv("LLM_PROVIDER");
+                    if (providerName == null || providerName.isBlank()) {
+                        providerName = "openai";
+                    }
+                    executor = createExecutorForProvider(providerName, apiKey);
                     promptExecutor = executor;
                 }
             }
         }
         return executor;
+    }
+
+    /**
+     * Creates a {@link MultiLLMPromptExecutor} for the configured provider.
+     */
+    private static MultiLLMPromptExecutor createExecutorForProvider(String providerName, String apiKey) {
+        String normalized = providerName.trim().toLowerCase(java.util.Locale.ROOT);
+        switch (normalized) {
+            case "openai":
+                return SimplePromptExecutors.simpleOpenAIExecutor(apiKey, new KtorKoogHttpClient.Factory());
+            case "anthropic":
+                return SimplePromptExecutors.simpleAnthropicExecutor(apiKey, new KtorKoogHttpClient.Factory());
+            case "google":
+                return SimplePromptExecutors.simpleGoogleAIExecutor(apiKey, new KtorKoogHttpClient.Factory());
+            case "deepseek":
+                return SimplePromptExecutors.simpleOpenAIExecutor(apiKey, new KtorKoogHttpClient.Factory());
+            case "openrouter":
+                return SimplePromptExecutors.simpleOpenRouterExecutor(apiKey, new KtorKoogHttpClient.Factory());
+            case "ollama":
+                return SimplePromptExecutors.simpleOllamaAIExecutor(apiKey, new KtorKoogHttpClient.Factory());
+            default:
+                return SimplePromptExecutors.simpleOpenAIExecutor(apiKey, new KtorKoogHttpClient.Factory());
+        }
     }
 
     /**
